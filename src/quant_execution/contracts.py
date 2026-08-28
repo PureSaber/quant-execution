@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-import re
 from types import MappingProxyType
-from typing import Mapping, TypeAlias
+from typing import TypeAlias
 
 from quant_data_kit import CorporateActionEvent, FixedPoint, ensure_utc_datetime
 from quant_data_kit.exceptions import ValidationError
@@ -427,7 +428,7 @@ class AccountSnapshot:
     base_currency: str
     cash_balances: Mapping[str, FixedPoint] = field(default_factory=dict)
     positions: Mapping[str, FixedPoint] = field(default_factory=dict)
-    nav: FixedPoint = FixedPoint(0, 2)
+    nav: FixedPoint = field(default_factory=lambda: FixedPoint(0, 2))
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "account_id", _required_text(self.account_id, "account_id"))
