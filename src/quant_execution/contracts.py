@@ -43,6 +43,31 @@ class OrderStatus(str, Enum):
     EXPIRED = "expired"
 
 
+ORDER_STATUS_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
+    OrderStatus.CREATED: frozenset({OrderStatus.ACCEPTED, OrderStatus.REJECTED}),
+    OrderStatus.ACCEPTED: frozenset(
+        {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.EXPIRED,
+        }
+    ),
+    OrderStatus.PARTIALLY_FILLED: frozenset(
+        {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.EXPIRED,
+        }
+    ),
+    OrderStatus.FILLED: frozenset(),
+    OrderStatus.CANCELLED: frozenset(),
+    OrderStatus.REJECTED: frozenset(),
+    OrderStatus.EXPIRED: frozenset(),
+}
+
+
 class LiquidityRole(str, Enum):
     MAKER = "maker"
     TAKER = "taker"
@@ -168,6 +193,19 @@ class Order:
             0 < filled.units < self.intent.quantity.units
         ):
             raise ValidationError("partially filled order must have an intermediate quantity")
+        minimum_versions = {
+            OrderStatus.CREATED: 0,
+            OrderStatus.ACCEPTED: 1,
+            OrderStatus.REJECTED: 1,
+            OrderStatus.PARTIALLY_FILLED: 2,
+            OrderStatus.FILLED: 2,
+            OrderStatus.CANCELLED: 2,
+            OrderStatus.EXPIRED: 2,
+        }
+        if self.status is OrderStatus.CREATED and self.version != 0:
+            raise ValidationError("created order must have version zero")
+        if self.status is not OrderStatus.CREATED and self.version < minimum_versions[self.status]:
+            raise ValidationError(f"{self.status.value} order version is inconsistent")
         object.__setattr__(self, "filled_quantity", filled)
 
 
@@ -195,6 +233,16 @@ class OrderEvent:
             raise ValidationError("order event statuses must be OrderStatus values")
         if not isinstance(self.reason, str):
             raise ValidationError("reason must be a string")
+        if self.to_status not in ORDER_STATUS_TRANSITIONS[self.from_status]:
+            raise ValidationError(
+                f"Illegal order transition: {self.from_status.value}->{self.to_status.value}"
+            )
+        if self.to_status in {
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.EXPIRED,
+        } and not self.reason.strip():
+            raise ValidationError(f"{self.to_status.value} order event requires a reason")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -358,10 +406,10 @@ class LedgerTransaction:
         )
         if not isinstance(self.event_type, LedgerEventType):
             raise ValidationError("event_type must be a LedgerEventType")
-        if len(self.postings) < 2 or any(
+        if not isinstance(self.postings, tuple) or len(self.postings) < 2 or any(
             not isinstance(posting, Posting) for posting in self.postings
         ):
-            raise ValidationError("ledger transaction requires at least two postings")
+            raise ValidationError("ledger transaction requires an immutable tuple of postings")
         balances: dict[str, Decimal] = {}
         for posting in self.postings:
             balances[posting.currency] = balances.get(
