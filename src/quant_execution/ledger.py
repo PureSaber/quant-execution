@@ -44,6 +44,7 @@ from quant_execution.schemas import execution_payload
 
 UTC = timezone.utc
 _OPENED_AT = datetime(1970, 1, 1, tzinfo=UTC)
+_MISSING = object()
 
 
 def _canonical(value: object) -> bytes:
@@ -457,9 +458,12 @@ class ExactAccountLedger:
             settlement_price = self._settlement_price(event)
         elif isinstance(event, CorporateActionEvent):
             self._validate_corporate_action(event)
-        checkpoint = self.capture_state() if create_snapshot else None
+        posting_cache_size = len(self._posting_cache)
+        transaction: LedgerTransaction | None = None
+        undo: dict[str, object] | None = None
         try:
             transaction = self._translate(event)
+            undo = self._capture_apply_undo(event, transaction, reference_id)
             self._post(transaction)
             if isinstance(event, Fill):
                 self._fills[event.fill_id] = event
@@ -480,9 +484,114 @@ class ExactAccountLedger:
             self._event_time = transaction.event_time
             return self.snapshot(transaction.event_time) if create_snapshot else None
         except Exception:
-            if checkpoint is not None:
-                self.restore_state(checkpoint)
+            if transaction is not None and undo is not None:
+                self._rollback_apply(event, transaction, reference_id, undo)
+            while len(self._posting_cache) > posting_cache_size:
+                self._posting_cache.popitem()
             raise
+
+    def _capture_apply_undo(
+        self,
+        event: LedgerEvent,
+        transaction: LedgerTransaction,
+        reference_id: str,
+    ) -> dict[str, object]:
+        account_keys = {
+            (posting.ledger_account, posting.currency, posting.instrument_id)
+            for posting in transaction.postings
+        }
+        position_ids = {
+            posting.instrument_id
+            for posting in transaction.postings
+            if posting.ledger_account == "assets:position"
+            and posting.instrument_id is not None
+            and posting.quantity_delta is not None
+        }
+        instrument_id = getattr(event, "instrument_id", None)
+        return {
+            "transaction_count": len(self._transactions),
+            "transaction_key": transaction.idempotency_key in self._transaction_keys,
+            "accounts": {key: self._accounts.get(key, _MISSING) for key in account_keys},
+            "positions": {
+                instrument: self._positions.get(instrument, _MISSING) for instrument in position_ids
+            },
+            "event_fingerprint": self._event_fingerprints.get(reference_id, _MISSING),
+            "fill": (
+                self._fills.get(event.fill_id, _MISSING) if isinstance(event, Fill) else _MISSING
+            ),
+            "fill_trading_day": (
+                self._fill_trading_days.get(event.fill_id, _MISSING)
+                if isinstance(event, Fill)
+                else _MISSING
+            ),
+            "fill_close_allocation": (
+                self._fill_close_allocations.get(event.fill_id, _MISSING)
+                if isinstance(event, Fill)
+                else _MISSING
+            ),
+            "position_lots": (
+                self._position_lots.get(instrument_id, _MISSING)
+                if instrument_id is not None
+                else _MISSING
+            ),
+            "mark": (
+                self._marks.get(instrument_id, _MISSING) if instrument_id is not None else _MISSING
+            ),
+            "event_time": self._event_time,
+        }
+
+    def _rollback_apply(
+        self,
+        event: LedgerEvent,
+        transaction: LedgerTransaction,
+        reference_id: str,
+        undo: dict[str, object],
+    ) -> None:
+        transaction_count = int(undo["transaction_count"])
+        del self._transactions[transaction_count:]
+        if not undo["transaction_key"]:
+            self._transaction_keys.discard(transaction.idempotency_key)
+        self._restore_values(self._accounts, undo["accounts"])
+        self._restore_values(self._positions, undo["positions"])
+        self._restore_value(
+            self._event_fingerprints,
+            reference_id,
+            undo["event_fingerprint"],
+        )
+        instrument_id = getattr(event, "instrument_id", None)
+        if isinstance(event, Fill):
+            self._restore_value(self._fills, event.fill_id, undo["fill"])
+            self._restore_value(
+                self._fill_trading_days,
+                event.fill_id,
+                undo["fill_trading_day"],
+            )
+            self._restore_value(
+                self._fill_close_allocations,
+                event.fill_id,
+                undo["fill_close_allocation"],
+            )
+        if instrument_id is not None:
+            self._restore_value(
+                self._position_lots,
+                instrument_id,
+                undo["position_lots"],
+            )
+            self._restore_value(self._marks, instrument_id, undo["mark"])
+        self._event_time = undo["event_time"]
+
+    @staticmethod
+    def _restore_values(mapping: dict, values: object) -> None:
+        assert isinstance(values, dict)
+        for key, value in values.items():
+            ExactAccountLedger._restore_value(mapping, key, value)
+
+    @staticmethod
+    def _restore_value(mapping: dict, key: object, value: object) -> None:
+        if value is _MISSING:
+            mapping.pop(key, None)
+        else:
+            mapping[key] = value
 
     def apply_with_trading_day(
         self,

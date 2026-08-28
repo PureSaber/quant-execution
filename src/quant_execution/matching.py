@@ -362,19 +362,13 @@ class L2MatchingModel(_BaseMatchingModel):
     def reset(self) -> None:
         self._books: dict[str, dict[str, dict[int, FixedPoint] | int]] = {}
         self._queue_ahead: dict[str, Decimal] = {}
-        self._queue_keys: dict[str, tuple[Side, int, int]] = {}
+        self._queue_keys: dict[str, tuple[str, Side, int, int]] = {}
+        self._queue_priority: dict[str, tuple[object, ...]] = {}
+        self._queue_remaining: dict[str, Decimal] = {}
         self._triggered_stops: set[str] = set()
 
     def match(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> Sequence[Fill]:
-        active_ids = {order.order_id for order in open_orders}
-        self._queue_ahead = {
-            order_id: quantity
-            for order_id, quantity in self._queue_ahead.items()
-            if order_id in active_ids
-        }
-        self._queue_keys = {
-            order_id: key for order_id, key in self._queue_keys.items() if order_id in active_ids
-        }
+        self._reconcile_queues(market_event, open_orders)
         if isinstance(market_event, BookSnapshotEvent):
             self._apply_snapshot(market_event)
             return self._consume_book(market_event, open_orders)
@@ -384,6 +378,85 @@ class L2MatchingModel(_BaseMatchingModel):
         if isinstance(market_event, TradeEvent):
             return self._consume_queues(market_event, open_orders)
         return ()
+
+    def _reconcile_queues(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> None:
+        active = {order.order_id: order for order in open_orders}
+        removed = set(self._queue_keys).difference(active)
+        for order_id in sorted(removed, key=self._queue_priority.__getitem__):
+            key = self._queue_keys[order_id]
+            priority = self._queue_priority[order_id]
+            released = self._queue_remaining[order_id]
+            if released:
+                for later_id, later_key in self._queue_keys.items():
+                    if (
+                        later_id not in removed
+                        and later_key == key
+                        and self._queue_priority[later_id] > priority
+                    ):
+                        self._queue_ahead[later_id] = max(
+                            Decimal(0), self._queue_ahead[later_id] - released
+                        )
+            self._drop_queue(order_id)
+
+        for order_id, order in active.items():
+            if order_id in self._queue_remaining:
+                self._queue_remaining[order_id] = min(
+                    self._queue_remaining[order_id], decimal(remaining_quantity(order))
+                )
+
+        for order in _price_time_orders(open_orders):
+            if order.order_id in self._queue_keys or not self.eligible(order, market_event):
+                continue
+            book = self._books.get(order.intent.instrument_id)
+            if book is not None:
+                self._queue_passive_order(order, book)
+
+    def _drop_queue(self, order_id: str) -> None:
+        self._queue_ahead.pop(order_id, None)
+        self._queue_keys.pop(order_id, None)
+        self._queue_priority.pop(order_id, None)
+        self._queue_remaining.pop(order_id, None)
+
+    def _clear_instrument_queues(self, instrument_id: str) -> None:
+        for order_id, key in tuple(self._queue_keys.items()):
+            if key[0] == instrument_id:
+                self._drop_queue(order_id)
+
+    def _queue_passive_order(
+        self,
+        order: Order,
+        book: dict[str, dict[int, FixedPoint] | int],
+    ) -> None:
+        if order.intent.order_type not in {OrderType.LIMIT, OrderType.STOP_LIMIT}:
+            return
+        scale = int(book["price_scale"])
+        bids = book["bids"]
+        asks = book["asks"]
+        assert isinstance(bids, dict) and isinstance(asks, dict)
+        opposite = asks if order.intent.side is Side.BUY else bids
+        if any(self._book_marketable(order, price, scale) for price in opposite):
+            return
+        price_units = _exact_units(
+            order.intent.limit_price,
+            scale,
+            field="resting order limit_price",
+        )
+        same = bids if order.intent.side is Side.BUY else asks
+        market_ahead = decimal(same[price_units]) if price_units in same else Decimal(0)
+        key = (order.intent.instrument_id, order.intent.side, price_units, scale)
+        earlier_own = sum(
+            (
+                remaining
+                for order_id, remaining in self._queue_remaining.items()
+                if self._queue_keys[order_id] == key
+                and self._queue_priority[order_id] < (order.intent.created_at, order.order_id)
+            ),
+            Decimal(0),
+        )
+        self._queue_ahead[order.order_id] = market_ahead + earlier_own
+        self._queue_keys[order.order_id] = key
+        self._queue_priority[order.order_id] = (order.intent.created_at, order.order_id)
+        self._queue_remaining[order.order_id] = decimal(remaining_quantity(order))
 
     def _apply_snapshot(self, event: BookSnapshotEvent) -> None:
         price_scales = {level.price.scale for level in (*event.bids, *event.asks)}
@@ -395,8 +468,7 @@ class L2MatchingModel(_BaseMatchingModel):
             "price_scale": event.bids[0].price.scale,
             "sequence": int(event.sequence),
         }
-        self._queue_ahead.clear()
-        self._queue_keys.clear()
+        self._clear_instrument_queues(event.instrument_id)
 
     def _apply_delta(self, event: BookDeltaEvent) -> None:
         try:
@@ -425,6 +497,7 @@ class L2MatchingModel(_BaseMatchingModel):
             expected_side = Side.BUY if event.side is BookSide.BID else Side.SELL
             for order_id in tuple(self._queue_ahead):
                 if self._queue_keys.get(order_id) != (
+                    event.instrument_id,
                     expected_side,
                     event.price.units,
                     event.price.scale,
@@ -443,7 +516,6 @@ class L2MatchingModel(_BaseMatchingModel):
         asks = dict(book["asks"])
         scale = int(book["price_scale"])
         fills: list[Fill] = []
-        prior_at_price: dict[tuple[Side, int, int], Decimal] = {}
         for order in _price_time_orders(orders):
             if not self.eligible(order, event):
                 continue
@@ -495,14 +567,8 @@ class L2MatchingModel(_BaseMatchingModel):
                     scale,
                     field="resting order limit_price",
                 )
-                same = bids if order.intent.side is Side.BUY else asks
-                market_ahead = decimal(same[price_units]) if price_units in same else Decimal(0)
-                key = (order.intent.side, price_units, scale)
-                self._queue_ahead.setdefault(
-                    order.order_id, market_ahead + prior_at_price.get(key, Decimal(0))
-                )
-                self._queue_keys.setdefault(order.order_id, key)
-                prior_at_price[key] = prior_at_price.get(key, Decimal(0)) + remaining
+                if order.order_id not in self._queue_keys:
+                    self._queue_passive_order(order, book)
         return tuple(fills)
 
     def _book_marketable(self, order: Order, price_units: int, scale: int) -> bool:
@@ -541,9 +607,12 @@ class L2MatchingModel(_BaseMatchingModel):
                 continue
             if order.intent.side is Side.SELL and trade.aggressor_side is not AggressorSide.BUY:
                 continue
-            queue_side, queue_units, queue_scale = self._queue_keys[order.order_id]
+            queue_instrument, queue_side, queue_units, queue_scale = self._queue_keys[
+                order.order_id
+            ]
             if (
-                queue_side is not order.intent.side
+                queue_instrument != trade.instrument_id
+                or queue_side is not order.intent.side
                 or trade.price.scale != queue_scale
                 or trade.price.units != queue_units
             ):
@@ -553,7 +622,9 @@ class L2MatchingModel(_BaseMatchingModel):
             self._queue_ahead[order.order_id] = max(Decimal(0), ahead - traded_at_level)
             if executable <= 0:
                 continue
-            remaining = decimal(remaining_quantity(order))
+            remaining = min(
+                decimal(remaining_quantity(order)), self._queue_remaining[order.order_id]
+            )
             if order.intent.time_in_force is TimeInForce.FOK and remaining > executable:
                 continue
             quantity = _quantity_from_available(order, min(remaining, executable))
@@ -570,4 +641,5 @@ class L2MatchingModel(_BaseMatchingModel):
                     len(fills),
                 )
             )
+            self._queue_remaining[order.order_id] = remaining - decimal(quantity)
         return tuple(fills)

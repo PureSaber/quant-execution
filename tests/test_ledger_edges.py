@@ -120,6 +120,62 @@ def test_direct_ledger_mutations_rollback_snapshot_failures_and_unsafe_ratios() 
     assert eur_ledger.capture_state() == mark_before
 
 
+def test_apply_without_snapshot_rolls_back_post_and_auxiliary_failures(monkeypatch) -> None:
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments={STOCK: stock_spec()},
+        initial_cash={"CNY": fp("10000")},
+    )
+    ledger.mark(mark(STOCK, "10", 1))
+    bought = fill("atomic-opening", STOCK, Side.BUY, "100", "10", seconds=1)
+    ledger.apply_with_trading_day(bought, trading_day=date(2026, 1, 2))
+
+    original_post = ledger._post
+
+    def post_then_fail(transaction):
+        original_post(transaction)
+        raise RuntimeError("injected post-commit failure")
+
+    monkeypatch.setattr(ledger, "_post", post_then_fail)
+    before = ledger.capture_state()
+    before_hash = ledger.journal_sha256
+    additional = fill("atomic-additional", STOCK, Side.BUY, "100", "10", seconds=2)
+    with pytest.raises(RuntimeError, match="post-commit"):
+        ledger.apply_with_trading_day(
+            additional,
+            trading_day=date(2026, 1, 2),
+            create_snapshot=False,
+        )
+    assert ledger.capture_state() == before
+    assert ledger.journal_sha256 == before_hash
+
+    split = CorporateActionEvent(
+        **event_fields("atomic-split-post", STOCK, seconds=2),
+        action_type="split",
+        effective_date=T0.date(),
+        ratio=fp("2"),
+    )
+    with pytest.raises(RuntimeError, match="post-commit"):
+        ledger.apply(split, create_snapshot=False)
+    assert ledger.capture_state() == before
+    assert ledger.journal_sha256 == before_hash
+
+    monkeypatch.setattr(ledger, "_post", original_post)
+    original_split = ledger._apply_split_state
+
+    def split_then_fail(event):
+        original_split(event)
+        raise RuntimeError("injected auxiliary-state failure")
+
+    monkeypatch.setattr(ledger, "_apply_split_state", split_then_fail)
+    auxiliary_split = replace(split, event_id="atomic-split-aux", sequence=3)
+    with pytest.raises(RuntimeError, match="auxiliary-state"):
+        ledger.apply(auxiliary_split, create_snapshot=False)
+    assert ledger.capture_state() == before
+    assert ledger.journal_sha256 == before_hash
+
+
 def test_direct_market_observation_and_event_time_fail_closed_boundaries() -> None:
     eur_stock = replace(stock_spec(), settlement_currency="EUR")
     broken = ExactAccountLedger(

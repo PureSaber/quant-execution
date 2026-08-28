@@ -236,3 +236,203 @@ def test_l2_same_price_trade_consumes_shared_queue_once_in_price_time_order() ->
         (expected[0].order_id, fp("1")),
         (expected[1].order_id, fp("1")),
     ]
+
+
+@pytest.mark.parametrize("terminal_action", ["cancel", "expire"])
+def test_l2_terminal_predecessor_releases_later_same_price_queue(
+    terminal_action: str,
+) -> None:
+    broker = DeterministicBroker()
+    first = order(
+        broker,
+        f"{terminal_action}-first",
+        quantity="1",
+        price="99",
+        created_seconds=0,
+    )
+    second = order(
+        broker,
+        f"{terminal_action}-second",
+        quantity="1",
+        price="99",
+        created_seconds=1,
+    )
+    model = L2MatchingModel({ASSET: instrument()})
+    book = BookSnapshotEvent(
+        **event_fields(f"{terminal_action}-book", ASSET, seconds=2, sequence=30),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(book, broker.open_orders) == ()
+    if terminal_action == "cancel":
+        broker.cancel(
+            first.order_id,
+            idempotency_key="cancel-first",
+            created_at=T0 + timedelta(seconds=3),
+        )
+    else:
+        broker.expire(
+            first.order_id,
+            event_time=T0 + timedelta(seconds=3),
+            reason="fixture expiry",
+        )
+    trade = TradeEvent(
+        **event_fields(f"{terminal_action}-trade", ASSET, seconds=4),
+        price=fp("99"),
+        quantity=fp("6"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    fills = model.match(trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in fills] == [(second.order_id, fp("1"))]
+
+
+def test_l2_rejected_predecessor_never_reserves_queue() -> None:
+    broker = DeterministicBroker()
+    rejected_intent = OrderIntent(
+        idempotency_key="rejected-first",
+        account_id="account",
+        strategy_id="strategy",
+        instrument_id=ASSET,
+        side=Side.BUY,
+        quantity=fp("1"),
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        created_at=T0,
+        limit_price=fp("99"),
+    )
+    broker.reject(rejected_intent, code="FIXTURE_REJECTION")
+    second = order(
+        broker,
+        "accepted-second",
+        quantity="1",
+        price="99",
+        created_seconds=1,
+    )
+    model = L2MatchingModel({ASSET: instrument()})
+    book = BookSnapshotEvent(
+        **event_fields("rejected-book", ASSET, seconds=2, sequence=40),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(book, broker.open_orders) == ()
+    trade = TradeEvent(
+        **event_fields("rejected-trade", ASSET, seconds=3),
+        price=fp("99"),
+        quantity=fp("6"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    fills = model.match(trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in fills] == [(second.order_id, fp("1"))]
+
+
+def test_l2_partial_then_complete_fill_preserves_later_queue_position() -> None:
+    broker = DeterministicBroker()
+    first = order(
+        broker,
+        "partial-first",
+        quantity="2",
+        price="99",
+        created_seconds=0,
+    )
+    second = order(
+        broker,
+        "partial-second",
+        quantity="1",
+        price="99",
+        created_seconds=1,
+    )
+    model = L2MatchingModel({ASSET: instrument()})
+    book = BookSnapshotEvent(
+        **event_fields("partial-book", ASSET, seconds=2, sequence=50),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(book, broker.open_orders) == ()
+
+    first_trade = TradeEvent(
+        **event_fields("partial-trade-1", ASSET, seconds=3),
+        price=fp("99"),
+        quantity=fp("6"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    first_fills = model.match(first_trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in first_fills] == [(first.order_id, fp("1"))]
+    broker.apply_fill(first_fills[0])
+
+    second_trade = TradeEvent(
+        **event_fields("partial-trade-2", ASSET, seconds=4),
+        price=fp("99"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    second_fills = model.match(second_trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in second_fills] == [(first.order_id, fp("1"))]
+    broker.apply_fill(second_fills[0])
+
+    third_trade = TradeEvent(
+        **event_fields("partial-trade-3", ASSET, seconds=5),
+        price=fp("99"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    third_fills = model.match(third_trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in third_fills] == [(second.order_id, fp("1"))]
+
+
+def test_l2_books_and_queues_are_isolated_across_instruments() -> None:
+    other = "crypto:test:ETHUSDT"
+    other_spec = spec(
+        other,
+        asset_class=AssetClass.CRYPTO,
+        product_type="spot",
+        settlement_currency="USDT",
+        base_currency="ETH",
+        quote_currency="USDT",
+    )
+    registry = {ASSET: instrument(), other: other_spec}
+
+    broker = DeterministicBroker()
+    passive = order(broker, "snapshot-isolation", quantity="1", price="99")
+    model = L2MatchingModel(registry)
+    asset_book = BookSnapshotEvent(
+        **event_fields("asset-book", ASSET, seconds=1, sequence=60),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    other_book = BookSnapshotEvent(
+        **event_fields("other-book", other, seconds=2, sequence=70),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(asset_book, broker.open_orders) == ()
+    assert model.match(other_book, broker.open_orders) == ()
+    asset_trade = TradeEvent(
+        **event_fields("asset-after-other-book", ASSET, seconds=3),
+        price=fp("99"),
+        quantity=fp("6"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    fills = model.match(asset_trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in fills] == [(passive.order_id, fp("1"))]
+
+    broker = DeterministicBroker()
+    passive = order(broker, "delta-isolation", quantity="1", price="99")
+    model.reset()
+    assert model.match(other_book, ()) == ()
+    assert model.match(asset_book, broker.open_orders) == ()
+    other_delta = BookDeltaEvent(
+        **event_fields("other-delta", other, seconds=3, sequence=71),
+        side=BookSide.BID,
+        action=BookAction.UPSERT,
+        price=fp("99"),
+        quantity=fp("4"),
+        previous_sequence=70,
+    )
+    assert model.match(other_delta, broker.open_orders) == ()
+    insufficient_trade = TradeEvent(
+        **event_fields("asset-after-other-delta", ASSET, seconds=4),
+        price=fp("99"),
+        quantity=fp("5"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    assert model.match(insufficient_trade, broker.open_orders) == ()

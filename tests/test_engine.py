@@ -7,7 +7,15 @@ from pathlib import Path
 
 import pytest
 from conftest import T0, event_fields, fp
-from quant_data_kit import BarEvent, FundingRateEvent, MarketEvent
+from quant_data_kit import (
+    AggressorSide,
+    BarEvent,
+    BookLevel,
+    BookSnapshotEvent,
+    FundingRateEvent,
+    MarketEvent,
+    TradeEvent,
+)
 from quant_data_kit.exceptions import ValidationError
 from test_rules import FUTURE, PERP, SPOT, STOCK, specs
 
@@ -15,7 +23,7 @@ from quant_execution import OrderIntent, OrderType, Side, TimeInForce
 from quant_execution.broker import DeterministicBroker
 from quant_execution.engine import DeterministicRunEngine, ReplayError
 from quant_execution.ledger import ExactAccountLedger
-from quant_execution.matching import BarMatchingModel
+from quant_execution.matching import BarMatchingModel, L2MatchingModel
 from quant_execution.rules import RuleBookRiskGate
 
 
@@ -186,6 +194,51 @@ def test_same_engine_three_consecutive_replays_are_bitwise_deterministic() -> No
     engine, events = scenario_crypto()
     results = [result_payload(engine, events) for _ in range(3)]
     assert results[0] == results[1] == results[2]
+
+
+def test_engine_queues_snapshot_callback_order_before_next_trade_without_lookahead() -> None:
+    registry = {SPOT: specs()[SPOT]}
+    observed_open_orders: list[tuple[str, int]] = []
+
+    class RecordingL2Model(L2MatchingModel):
+        def match(self, market_event, open_orders):
+            observed_open_orders.append((market_event.event_id, len(open_orders)))
+            return super().match(market_event, open_orders)
+
+    strategy = FixtureStrategy({"l2-book": [Signal(SPOT, Side.BUY, fp("1.000", 3), fp("99"))]})
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="USDT",
+        instruments=registry,
+        initial_cash={"USDT": fp("100000")},
+    )
+    engine = DeterministicRunEngine(
+        run_id="l2-causal-ordering",
+        account_id="account",
+        strategy_id="strategy",
+        strategy=strategy,
+        broker=DeterministicBroker(),
+        risk_gate=RuleBookRiskGate(instruments=registry, ledger=ledger),
+        matching_model=RecordingL2Model(registry),
+        ledger=ledger,
+    )
+    book = BookSnapshotEvent(
+        **event_fields("l2-book", SPOT, seconds=60, sequence=1),
+        bids=(BookLevel(fp("99"), fp("5.000", 3)),),
+        asks=(BookLevel(fp("100"), fp("5.000", 3)),),
+    )
+    trade = TradeEvent(
+        **event_fields("l2-trade", SPOT, seconds=120, sequence=2),
+        price=fp("99"),
+        quantity=fp("6.000", 3),
+        aggressor_side=AggressorSide.SELL,
+    )
+    result = engine.replay([book, trade], 7)
+    assert observed_open_orders == [("l2-book", 0), ("l2-trade", 1)]
+    assert result.fill_count == 1
+    assert engine.artifacts is not None
+    assert engine.artifacts.fills[0].quantity == fp("1.000", 3)
+    assert engine.artifacts.fills[0].event_time == trade.available_at
 
 
 def test_three_cross_asset_golden_replays() -> None:
