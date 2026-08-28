@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 
@@ -371,6 +371,67 @@ class L2MatchingModel(_BaseMatchingModel):
         self._stop_triggered_at: dict[str, datetime] = {}
 
     def match(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> Sequence[Fill]:
+        staged = self._stage_match(market_event.instrument_id)
+        fills = staged._match_staged(market_event, open_orders)
+        self._commit_match(staged)
+        return fills
+
+    def _stage_match(self, instrument_id: str) -> L2MatchingModel:
+        """Create an isolated, shallow transaction state for one L2 event.
+
+        Orders, instruments and FixedPoint values are immutable. Only the current
+        instrument's nested book sides and the mutable queue/stop containers need
+        copying. The live model is therefore untouched until ``_commit_match`` and
+        any validation failure naturally discards this staged object.
+        """
+
+        staged = copy(self)
+        staged._books = self._stage_book_registry(self._books, instrument_id)
+        staged._liquidity_books = self._stage_book_registry(
+            self._liquidity_books,
+            instrument_id,
+        )
+        staged._queue_ahead = dict(self._queue_ahead)
+        staged._queue_keys = dict(self._queue_keys)
+        staged._queue_priority = dict(self._queue_priority)
+        staged._queue_remaining = dict(self._queue_remaining)
+        staged._triggered_stops = set(self._triggered_stops)
+        staged._stop_triggered_at = dict(self._stop_triggered_at)
+        return staged
+
+    @staticmethod
+    def _stage_book_registry(
+        registry: dict[str, dict[str, dict[int, FixedPoint] | int]],
+        instrument_id: str,
+    ) -> dict[str, dict[str, dict[int, FixedPoint] | int]]:
+        staged_registry = dict(registry)
+        book = registry.get(instrument_id)
+        if book is None:
+            return staged_registry
+        staged_book = dict(book)
+        bids = book["bids"]
+        asks = book["asks"]
+        assert isinstance(bids, dict) and isinstance(asks, dict)
+        staged_book["bids"] = dict(bids)
+        staged_book["asks"] = dict(asks)
+        staged_registry[instrument_id] = staged_book
+        return staged_registry
+
+    def _commit_match(self, staged: L2MatchingModel) -> None:
+        self._books = staged._books
+        self._liquidity_books = staged._liquidity_books
+        self._queue_ahead = staged._queue_ahead
+        self._queue_keys = staged._queue_keys
+        self._queue_priority = staged._queue_priority
+        self._queue_remaining = staged._queue_remaining
+        self._triggered_stops = staged._triggered_stops
+        self._stop_triggered_at = staged._stop_triggered_at
+
+    def _match_staged(
+        self,
+        market_event: MarketEvent,
+        open_orders: Sequence[Order],
+    ) -> Sequence[Fill]:
         if isinstance(market_event, BookSnapshotEvent):
             staged_book = self._stage_snapshot(market_event)
             self._apply_snapshot(market_event, staged_book)
