@@ -15,7 +15,10 @@ from quant_execution.contracts import (
     OrderIntent,
     OrderStatus,
     OrderType,
+    PortfolioRiskSnapshot,
+    PositionRiskSnapshot,
     Posting,
+    RiskCheckContext,
     RiskDecision,
     RunResult,
     Settlement,
@@ -33,6 +36,7 @@ from quant_execution.protocols import (
     AccountLedger,
     BrokerSimulator,
     MatchingModel,
+    PortfolioRiskPolicy,
     RiskGate,
     RunEngine,
     Strategy,
@@ -67,7 +71,7 @@ from quant_execution.schemas import (
 )
 from quant_execution.state_machine import ALLOWED_TRANSITIONS, transition_order
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "ACCOUNT_SNAPSHOT_SCHEMA_ID",
@@ -109,8 +113,12 @@ __all__ = [
     "OrderIntent",
     "OrderStatus",
     "OrderType",
+    "PortfolioRiskPolicy",
+    "PortfolioRiskSnapshot",
+    "PositionRiskSnapshot",
     "Posting",
     "ReplayError",
+    "RiskCheckContext",
     "RiskDecision",
     "RiskGate",
     "RuleBookRiskGate",
