@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-execution"
-version = "0.1.0"
-description = "Deterministic execution and ledger contracts for PureSaber quant research"
+version = "0.2.0"
+description = "Deterministic execution, matching, risk and ledger for PureSaber quant research"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "pyarrow>=14.0",
     "jsonschema>=4.20",
-    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.4.0",
+    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.5.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "ruff>=0.9.0"]
+dev = ["pytest>=7.4", "pytest-cov>=5.0", "ruff==0.16.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,3 +28,11 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.coverage.run]
+branch = true
+source = ["quant_execution"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

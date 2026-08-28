@@ -227,7 +227,11 @@ class OrderEvent:
         object.__setattr__(
             self, "event_time", ensure_utc_datetime(self.event_time, field="event_time")
         )
-        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
+        if (
+            isinstance(self.sequence, bool)
+            or not isinstance(self.sequence, int)
+            or self.sequence < 1
+        ):
             raise ValidationError("sequence must be a positive integer")
         if not isinstance(self.from_status, OrderStatus) or not isinstance(
             self.to_status, OrderStatus
@@ -247,11 +251,15 @@ class OrderEvent:
             raise ValidationError("fill_quantity is required exactly for fill order events")
         if self.fill_quantity is not None:
             _positive(self.fill_quantity, "fill_quantity")
-        if self.to_status in {
-            OrderStatus.CANCELLED,
-            OrderStatus.REJECTED,
-            OrderStatus.EXPIRED,
-        } and not self.reason.strip():
+        if (
+            self.to_status
+            in {
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+                OrderStatus.EXPIRED,
+            }
+            and not self.reason.strip()
+        ):
             raise ValidationError(f"{self.to_status.value} order event requires a reason")
 
 
@@ -391,9 +399,7 @@ class Posting:
                 "instrument_id",
                 _required_text(self.instrument_id, "instrument_id"),
             )
-        if self.quantity_delta is not None and not isinstance(
-            self.quantity_delta, FixedPoint
-        ):
+        if self.quantity_delta is not None and not isinstance(self.quantity_delta, FixedPoint):
             raise ValidationError("quantity_delta must be a FixedPoint or null")
 
 
@@ -416,15 +422,17 @@ class LedgerTransaction:
         )
         if not isinstance(self.event_type, LedgerEventType):
             raise ValidationError("event_type must be a LedgerEventType")
-        if not isinstance(self.postings, tuple) or len(self.postings) < 2 or any(
-            not isinstance(posting, Posting) for posting in self.postings
+        if (
+            not isinstance(self.postings, tuple)
+            or len(self.postings) < 2
+            or any(not isinstance(posting, Posting) for posting in self.postings)
         ):
             raise ValidationError("ledger transaction requires an immutable tuple of postings")
         balances: dict[str, Decimal] = {}
         for posting in self.postings:
-            balances[posting.currency] = balances.get(
-                posting.currency, Decimal(0)
-            ) + posting.amount.to_decimal()
+            balances[posting.currency] = (
+                balances.get(posting.currency, Decimal(0)) + posting.amount.to_decimal()
+            )
         unbalanced = {currency: total for currency, total in balances.items() if total != 0}
         if unbalanced:
             raise ValidationError(f"ledger transaction is unbalanced: {unbalanced}")
@@ -438,17 +446,24 @@ class AccountSnapshot:
     cash_balances: Mapping[str, FixedPoint] = field(default_factory=dict)
     positions: Mapping[str, FixedPoint] = field(default_factory=dict)
     nav: FixedPoint = field(default_factory=lambda: FixedPoint(0, 2))
+    cost_basis: Mapping[str, FixedPoint] = field(default_factory=dict)
+    realized_pnl: Mapping[str, FixedPoint] = field(default_factory=dict)
+    unrealized_pnl: Mapping[str, FixedPoint] = field(default_factory=dict)
+    initial_margin: FixedPoint = field(default_factory=lambda: FixedPoint(0, 2))
+    maintenance_margin: FixedPoint = field(default_factory=lambda: FixedPoint(0, 2))
+    liquidation_required: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "account_id", _required_text(self.account_id, "account_id"))
-        object.__setattr__(
-            self, "base_currency", _currency(self.base_currency, "base_currency")
-        )
+        object.__setattr__(self, "base_currency", _currency(self.base_currency, "base_currency"))
         object.__setattr__(
             self, "event_time", ensure_utc_datetime(self.event_time, field="event_time")
         )
-        if not isinstance(self.nav, FixedPoint):
-            raise ValidationError("nav must be a FixedPoint")
+        for field_name in ("nav", "initial_margin", "maintenance_margin"):
+            if not isinstance(getattr(self, field_name), FixedPoint):
+                raise ValidationError(f"{field_name} must be a FixedPoint")
+        if not isinstance(self.liquidation_required, bool):
+            raise ValidationError("liquidation_required must be boolean")
         object.__setattr__(
             self,
             "cash_balances",
@@ -459,9 +474,15 @@ class AccountSnapshot:
         object.__setattr__(
             self, "positions", _immutable_fixed_point_map(self.positions, "positions")
         )
+        for field_name in ("cost_basis", "realized_pnl", "unrealized_pnl"):
+            object.__setattr__(
+                self,
+                field_name,
+                _immutable_fixed_point_map(getattr(self, field_name), field_name),
+            )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class RiskDecision:
     accepted: bool
     code: str
@@ -496,6 +517,30 @@ class RunResult:
             value = _required_text(getattr(self, field_name), field_name)
             if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
                 raise ValidationError(f"{field_name} must be a lowercase SHA-256")
+
+    @property
+    def order_sha256(self) -> str:
+        """Compatibility alias: event_sha256 hashes the complete order-event stream."""
+        return self.event_sha256
+
+    @property
+    def result_sha256(self) -> str:
+        """Hash the immutable run summary without adding a recursive stored field."""
+        import hashlib
+        import json
+
+        payload = {
+            "run_id": self.run_id,
+            "seed": self.seed,
+            "event_count": self.event_count,
+            "order_count": self.order_count,
+            "fill_count": self.fill_count,
+            "order_sha256": self.order_sha256,
+            "fill_sha256": self.fill_sha256,
+            "ledger_sha256": self.ledger_sha256,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
 
 LedgerEvent: TypeAlias = Fill | Fee | Funding | Settlement | CorporateActionEvent

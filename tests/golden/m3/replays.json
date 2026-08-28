@@ -1,0 +1,32 @@
+{
+  "a_share": {
+    "event_count": 2,
+    "order_count": 1,
+    "fill_count": 1,
+    "order_sha256": "b298cc5d28aa7b8bcac94031ab755d86fc47cfa5f22a17a192f47341bb874d8a",
+    "fill_sha256": "8a0949bf268407908c5a07fe39314a9e9d93fcb4b276f31103db2b8b2dc8c988",
+    "ledger_sha256": "27a1edb25d0bec625196a1666a1f9bb4e8bc13303ab2e85879b7308da64fa8f8",
+    "result_sha256": "227a2f59f80a53749564b45b0d4efdafedc4965315dddfbb85daa2ef7e3ee9a6",
+    "nav": "99999.70000000"
+  },
+  "future": {
+    "event_count": 2,
+    "order_count": 1,
+    "fill_count": 1,
+    "order_sha256": "3fee0655396fee26f27e97a81ac204971cd14e4e4443f0e9612942c602611bcb",
+    "fill_sha256": "cc08cd9be9ff6e769961b86a14e2fce6aca66c379a14678e84bd99c8080f42be",
+    "ledger_sha256": "66bd4757d0fc88053968034c58ae454459b9a824891780a2af10ccb63b922e87",
+    "result_sha256": "617cf352dcb5c4c06a676e48be8c0382ef4ea884ca352fa9aebd352892ca9a6c",
+    "nav": "999976.00000000"
+  },
+  "crypto_spot_perpetual": {
+    "event_count": 5,
+    "order_count": 2,
+    "fill_count": 2,
+    "order_sha256": "1b0f25926313487f2d6530a74791b015b810015abd0e2aa1ecb77a361890e658",
+    "fill_sha256": "eb61584c20327c21951442ac53320b9fa646bee6a4d8d0ebb6e061acb27b31ca",
+    "ledger_sha256": "3fdc7fa7da602354b39549b237db722cdeea81c61ba69874fec3ccbaa113b0f7",
+    "result_sha256": "108899c425500a776a6f8a957b4d52a63f16f20ea72e738f886b95e7758f4170",
+    "nav": "99999.65000000"
+  }
+}

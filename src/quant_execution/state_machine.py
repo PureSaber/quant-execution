@@ -55,7 +55,10 @@ def transition_order(
         filled = FixedPoint(filled.units + fill_quantity.units, filled.scale)
         if filled.units > order.intent.quantity.units:
             raise ValidationError("fill transition would overfill the order")
-        if to_status is OrderStatus.PARTIALLY_FILLED and filled.units >= order.intent.quantity.units:
+        if (
+            to_status is OrderStatus.PARTIALLY_FILLED
+            and filled.units >= order.intent.quantity.units
+        ):
             raise ValidationError("partial fill must leave an open quantity")
         if to_status is OrderStatus.FILLED and filled.units != order.intent.quantity.units:
             raise ValidationError("filled transition must complete the order quantity")

@@ -44,14 +44,10 @@ def test_all_execution_goldens_match_json_and_arrow_field_contracts() -> None:
 
 def test_arrow_contract_rejects_nullable_or_wrong_physical_fields() -> None:
     schema = get_arrow_schema(FILL_SCHEMA_ID)
-    valid = pa.Table.from_arrays(
-        [pa.array([], type=field.type) for field in schema], schema=schema
-    )
+    valid = pa.Table.from_arrays([pa.array([], type=field.type) for field in schema], schema=schema)
     validate_arrow_table(FILL_SCHEMA_ID, valid)
 
-    wrong_schema = pa.schema(
-        [pa.field(field.name, field.type, nullable=True) for field in schema]
-    )
+    wrong_schema = pa.schema([pa.field(field.name, field.type, nullable=True) for field in schema])
     wrong = pa.Table.from_arrays(
         [pa.array([], type=field.type) for field in wrong_schema], schema=wrong_schema
     )
