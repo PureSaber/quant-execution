@@ -30,6 +30,7 @@ def order(
     broker: DeterministicBroker,
     key: str,
     *,
+    instrument_id: str = ASSET,
     side: Side = Side.BUY,
     quantity: str = "5",
     order_type: OrderType = OrderType.LIMIT,
@@ -43,7 +44,7 @@ def order(
             idempotency_key=key,
             account_id="account",
             strategy_id="strategy",
-            instrument_id=ASSET,
+            instrument_id=instrument_id,
             side=side,
             quantity=fp(quantity),
             order_type=order_type,
@@ -576,7 +577,7 @@ def test_l2_trade_triggered_stop_limit_starts_on_next_event_and_fills_partially(
         side=book_side,
         action=BookAction.UPSERT,
         price=fp(book_price),
-        quantity=fp("1"),
+        quantity=fp("2"),
         previous_sequence=101,
     )
     second_fill = model.match(second_visible, broker.open_orders)
@@ -868,3 +869,361 @@ def test_l2_trigger_time_places_old_stop_limit_behind_existing_resting_order() -
     )
     second_fill = model.match(second_trade, broker.open_orders)
     assert [(fill.order_id, fill.quantity) for fill in second_fill] == [(dormant.order_id, fp("1"))]
+
+
+@pytest.mark.parametrize(
+    ("side", "book_side", "book_price"),
+    [
+        (Side.BUY, BookSide.ASK, "100"),
+        (Side.SELL, BookSide.BID, "100"),
+    ],
+)
+def test_l2_gtc_market_persistently_consumes_saved_liquidity_until_market_data_replenishes(
+    side: Side,
+    book_side: BookSide,
+    book_price: str,
+) -> None:
+    broker = DeterministicBroker()
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields(f"persistent-market-book-{side.value}", ASSET, seconds=1, sequence=200),
+        bids=(BookLevel(fp("100" if side is Side.SELL else "99"), fp("1")),),
+        asks=(BookLevel(fp("101" if side is Side.SELL else "100"), fp("1")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    authoritative = {
+        "bids": dict(model._books[ASSET]["bids"]),
+        "asks": dict(model._books[ASSET]["asks"]),
+    }
+    market = order(
+        broker,
+        f"persistent-market-{side.value}",
+        side=side,
+        quantity="3",
+        order_type=OrderType.MARKET,
+        price=None,
+        created_seconds=2,
+    )
+
+    first_trade = TradeEvent(
+        **event_fields(f"persistent-market-first-{side.value}", ASSET, seconds=3),
+        price=fp(book_price),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.SELL if side is Side.BUY else AggressorSide.BUY,
+    )
+    first_fill = model.match(first_trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in first_fill] == [(market.order_id, fp("1"))]
+    broker.apply_fill(first_fill[0])
+
+    second_trade = TradeEvent(
+        **event_fields(f"persistent-market-second-{side.value}", ASSET, seconds=4),
+        price=fp(book_price),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.SELL if side is Side.BUY else AggressorSide.BUY,
+    )
+    assert model.match(second_trade, broker.open_orders) == ()
+    assert model._books[ASSET]["bids"] == authoritative["bids"]
+    assert model._books[ASSET]["asks"] == authoritative["asks"]
+
+    delta = BookDeltaEvent(
+        **event_fields(f"persistent-market-delta-{side.value}", ASSET, seconds=5, sequence=201),
+        side=book_side,
+        action=BookAction.UPSERT,
+        price=fp(book_price),
+        quantity=fp("2"),
+        previous_sequence=200,
+    )
+    delta_fill = model.match(delta, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in delta_fill] == [(market.order_id, fp("1"))]
+    broker.apply_fill(delta_fill[0])
+
+    refreshed = BookSnapshotEvent(
+        **event_fields(f"persistent-market-refresh-{side.value}", ASSET, seconds=6, sequence=202),
+        bids=(BookLevel(fp("100" if side is Side.SELL else "99"), fp("1")),),
+        asks=(BookLevel(fp("101" if side is Side.SELL else "100"), fp("1")),),
+    )
+    snapshot_fill = model.match(refreshed, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in snapshot_fill] == [
+        (market.order_id, fp("1"))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("side", "order_type", "stop", "limit", "trigger_price", "book_side", "book_price"),
+    [
+        (Side.BUY, OrderType.STOP, "105", None, "106", BookSide.ASK, "100"),
+        (Side.BUY, OrderType.STOP_LIMIT, "105", "106", "106", BookSide.ASK, "100"),
+        (Side.SELL, OrderType.STOP, "95", None, "94", BookSide.BID, "100"),
+        (Side.SELL, OrderType.STOP_LIMIT, "95", "94", "94", BookSide.BID, "100"),
+    ],
+)
+def test_l2_triggered_stop_does_not_reuse_saved_liquidity_across_trades(
+    side: Side,
+    order_type: OrderType,
+    stop: str,
+    limit: str | None,
+    trigger_price: str,
+    book_side: BookSide,
+    book_price: str,
+) -> None:
+    broker = DeterministicBroker()
+    waiting = order(
+        broker,
+        f"persistent-stop-{order_type.value}-{side.value}",
+        side=side,
+        quantity="3",
+        order_type=order_type,
+        price=limit,
+        stop=stop,
+    )
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields(f"persistent-stop-book-{side.value}", ASSET, seconds=1, sequence=210),
+        bids=(BookLevel(fp("100" if side is Side.SELL else "99"), fp("1")),),
+        asks=(BookLevel(fp("101" if side is Side.SELL else "100"), fp("1")),),
+    )
+    assert model.match(snapshot, broker.open_orders) == ()
+    authoritative = {
+        "bids": dict(model._books[ASSET]["bids"]),
+        "asks": dict(model._books[ASSET]["asks"]),
+    }
+    trigger = TradeEvent(
+        **event_fields(f"persistent-stop-trigger-{side.value}", ASSET, seconds=2),
+        price=fp(trigger_price),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.BUY if side is Side.BUY else AggressorSide.SELL,
+    )
+    assert model.match(trigger, broker.open_orders) == ()
+
+    first_trade = TradeEvent(
+        **event_fields(f"persistent-stop-first-{side.value}", ASSET, seconds=3),
+        price=fp(book_price),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.BUY if side is Side.BUY else AggressorSide.SELL,
+    )
+    first_fill = model.match(first_trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in first_fill] == [(waiting.order_id, fp("1"))]
+    broker.apply_fill(first_fill[0])
+
+    repeated_trade = TradeEvent(
+        **event_fields(f"persistent-stop-repeated-{side.value}", ASSET, seconds=4),
+        price=fp(book_price),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.BUY if side is Side.BUY else AggressorSide.SELL,
+    )
+    assert model.match(repeated_trade, broker.open_orders) == ()
+    assert model._books[ASSET]["bids"] == authoritative["bids"]
+    assert model._books[ASSET]["asks"] == authoritative["asks"]
+
+    delta = BookDeltaEvent(
+        **event_fields(f"persistent-stop-delta-{side.value}", ASSET, seconds=5, sequence=211),
+        side=book_side,
+        action=BookAction.UPSERT,
+        price=fp(book_price),
+        quantity=fp("2"),
+        previous_sequence=210,
+    )
+    delta_fill = model.match(delta, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in delta_fill] == [(waiting.order_id, fp("1"))]
+    broker.apply_fill(delta_fill[0])
+
+    refreshed = BookSnapshotEvent(
+        **event_fields(f"persistent-stop-refresh-{side.value}", ASSET, seconds=6, sequence=212),
+        bids=(BookLevel(fp("100" if side is Side.SELL else "99"), fp("1")),),
+        asks=(BookLevel(fp("101" if side is Side.SELL else "100"), fp("1")),),
+    )
+    snapshot_fill = model.match(refreshed, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in snapshot_fill] == [
+        (waiting.order_id, fp("1"))
+    ]
+
+
+def test_l2_delta_preserves_simulated_consumption_gap_for_level_lifecycle() -> None:
+    broker = DeterministicBroker()
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields("overlay-delta-book", ASSET, seconds=1, sequence=220),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    order(
+        broker,
+        "overlay-delta-market",
+        quantity="2",
+        order_type=OrderType.MARKET,
+        price=None,
+        created_seconds=2,
+    )
+    trade = TradeEvent(
+        **event_fields("overlay-delta-trade", ASSET, seconds=3),
+        price=fp("100"),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    fills = model.match(trade, broker.open_orders)
+    assert sum((fill.quantity.to_decimal() for fill in fills), Decimal(0)) == Decimal(2)
+    broker.apply_fill(fills[0])
+    assert model._books[ASSET]["asks"] == {fp("100").units: fp("5")}
+    assert model._liquidity_books[ASSET]["asks"] == {fp("100").units: fp("3")}
+
+    updates = [
+        (221, BookAction.UPSERT, "100", "7", {fp("100").units: fp("5")}),
+        (222, BookAction.UPSERT, "100", "4", {fp("100").units: fp("2")}),
+        (
+            223,
+            BookAction.UPSERT,
+            "101",
+            "1.25",
+            {fp("100").units: fp("2"), fp("101").units: fp("1.25")},
+        ),
+        (224, BookAction.DELETE, "101", "0", {fp("100").units: fp("2")}),
+        (225, BookAction.UPSERT, "100", "1", {}),
+    ]
+    previous_sequence = 220
+    for sequence, action, price, quantity, expected in updates:
+        delta = BookDeltaEvent(
+            **event_fields(
+                f"overlay-delta-{sequence}", ASSET, seconds=sequence - 217, sequence=sequence
+            ),
+            side=BookSide.ASK,
+            action=action,
+            price=fp(price),
+            quantity=fp(quantity),
+            previous_sequence=previous_sequence,
+        )
+        assert model.match(delta, broker.open_orders) == ()
+        assert model._liquidity_books[ASSET]["asks"] == expected
+        previous_sequence = sequence
+
+
+@pytest.mark.parametrize("taker_side", [Side.BUY, Side.SELL])
+def test_l2_taker_consumption_advances_only_the_corresponding_passive_queue(
+    taker_side: Side,
+) -> None:
+    other = "crypto:test:ETHUSDT"
+    registry = {
+        ASSET: instrument(),
+        other: spec(
+            other,
+            asset_class=AssetClass.CRYPTO,
+            product_type="spot",
+            settlement_currency="USDT",
+            base_currency="ETH",
+            quote_currency="USDT",
+        ),
+    }
+    broker = DeterministicBroker()
+    affected_side = Side.SELL if taker_side is Side.BUY else Side.BUY
+    affected_price = "100" if affected_side is Side.SELL else "99"
+    unaffected_price = "99" if taker_side is Side.BUY else "100"
+    affected = order(
+        broker,
+        f"overlay-queue-affected-{taker_side.value}",
+        side=affected_side,
+        quantity="1",
+        price=affected_price,
+    )
+    unaffected = order(
+        broker,
+        f"overlay-queue-unaffected-{taker_side.value}",
+        side=taker_side,
+        quantity="1",
+        price=unaffected_price,
+    )
+    other_passive = order(
+        broker,
+        f"overlay-queue-other-{taker_side.value}",
+        instrument_id=other,
+        side=affected_side,
+        quantity="1",
+        price=affected_price,
+    )
+    model = L2MatchingModel(registry)
+    snapshot = BookSnapshotEvent(
+        **event_fields("overlay-queue-book", ASSET, seconds=1, sequence=230),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    other_snapshot = BookSnapshotEvent(
+        **event_fields("overlay-queue-other-book", other, seconds=1, sequence=230),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(snapshot, broker.open_orders) == ()
+    assert model.match(other_snapshot, broker.open_orders) == ()
+    assert model._queue_ahead[affected.order_id] == Decimal(5)
+    assert model._queue_ahead[unaffected.order_id] == Decimal(5)
+    assert model._queue_ahead[other_passive.order_id] == Decimal(5)
+
+    taker = order(
+        broker,
+        f"overlay-queue-taker-{taker_side.value}",
+        side=taker_side,
+        quantity="2",
+        order_type=OrderType.MARKET,
+        price=None,
+        created_seconds=2,
+    )
+    trade = TradeEvent(
+        **event_fields("overlay-queue-trade", ASSET, seconds=3),
+        price=fp("100" if taker_side is Side.BUY else "99"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.SELL if taker_side is Side.BUY else AggressorSide.BUY,
+    )
+    fills = model.match(trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity) for fill in fills] == [(taker.order_id, fp("2"))]
+    broker.apply_fill(fills[0])
+    assert model._queue_ahead[affected.order_id] == Decimal(3)
+    assert model._queue_ahead[unaffected.order_id] == Decimal(5)
+    assert model._queue_ahead[other_passive.order_id] == Decimal(5)
+
+    later = order(
+        broker,
+        f"overlay-queue-later-{taker_side.value}",
+        side=affected_side,
+        quantity="1",
+        price=affected_price,
+        created_seconds=4,
+    )
+    quote = QuoteEvent(
+        **event_fields("overlay-queue-quote", ASSET, seconds=4),
+        bid_price=fp("99"),
+        bid_quantity=fp("5"),
+        ask_price=fp("100"),
+        ask_quantity=fp("5"),
+    )
+    assert model.match(quote, broker.open_orders) == ()
+    assert model._queue_ahead[later.order_id] == Decimal(4)
+
+
+def test_l2_liquidity_overlay_is_captured_and_restored() -> None:
+    broker = DeterministicBroker()
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields("overlay-checkpoint-book", ASSET, seconds=1, sequence=240),
+        bids=(BookLevel(fp("99"), fp("2")),),
+        asks=(BookLevel(fp("100"), fp("2")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    checkpoint = model.capture_state()
+    order(
+        broker,
+        "overlay-checkpoint-market",
+        quantity="1",
+        order_type=OrderType.MARKET,
+        price=None,
+        created_seconds=2,
+    )
+    trade = TradeEvent(
+        **event_fields("overlay-checkpoint-trade", ASSET, seconds=3),
+        price=fp("100"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    assert len(model.match(trade, broker.open_orders)) == 1
+    assert model._liquidity_books[ASSET]["asks"] == {fp("100").units: fp("1")}
+
+    model.restore_state(checkpoint)
+    assert model._liquidity_books[ASSET]["asks"] == {fp("100").units: fp("2")}
+    assert len(model.match(trade, broker.open_orders)) == 1
