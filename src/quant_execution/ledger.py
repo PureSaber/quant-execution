@@ -36,6 +36,8 @@ from quant_execution.contracts import (
     LedgerEvent,
     LedgerEventType,
     LedgerTransaction,
+    PortfolioRiskSnapshot,
+    PositionRiskSnapshot,
     Posting,
     Settlement,
     Side,
@@ -295,6 +297,80 @@ class ExactAccountLedger:
                     event_time,
                 )
         return cash, self._positions, nav, initial_margin
+
+    def portfolio_risk_snapshot(self, event_time: datetime) -> PortfolioRiskSnapshot:
+        """Build an exact, read-only base-currency exposure view at one PIT timestamp."""
+        at = ensure_utc_datetime(event_time, field="event_time")
+        account = self.snapshot(at)
+        cash_value = sum(
+            (
+                self._to_base(decimal(amount), currency, at)
+                for currency, amount in account.cash_balances.items()
+            ),
+            Decimal(0),
+        )
+        positions: list[PositionRiskSnapshot] = []
+        gross_exposure = Decimal(0)
+        net_exposure = Decimal(0)
+        initial_margin = Decimal(0)
+        maintenance_margin = Decimal(0)
+        for instrument_id, quantity_fp in sorted(account.positions.items()):
+            quantity = decimal(quantity_fp)
+            if quantity == 0:
+                continue
+            spec = self._spec(instrument_id)
+            mark = self._mark_price(instrument_id)
+            multiplier = decimal(spec.contract_multiplier)
+            local_notional = mark * quantity * multiplier
+            base_notional = self._to_base(local_notional, spec.settlement_currency, at)
+            position_initial = Decimal(0)
+            position_maintenance = Decimal(0)
+            if self._is_derivative(spec):
+                for key in ("initial_margin_rate", "maintenance_margin_rate"):
+                    if key not in spec.metadata:
+                        raise ValidationError(
+                            f"InstrumentSpec metadata {key!r} is required for risk snapshot"
+                        )
+                absolute_notional = abs(local_notional)
+                position_initial = self._to_base(
+                    absolute_notional * _meta_decimal(spec, "initial_margin_rate"),
+                    spec.settlement_currency,
+                    at,
+                )
+                position_maintenance = self._to_base(
+                    absolute_notional * _meta_decimal(spec, "maintenance_margin_rate"),
+                    spec.settlement_currency,
+                    at,
+                )
+            gross_exposure += abs(base_notional)
+            net_exposure += base_notional
+            initial_margin += position_initial
+            maintenance_margin += position_maintenance
+            positions.append(
+                PositionRiskSnapshot(
+                    instrument_id=instrument_id,
+                    asset_class=spec.asset_class,
+                    venue=spec.venue,
+                    settlement_currency=spec.settlement_currency,
+                    quantity=quantity_fp,
+                    mark_price=fixed(mark, spec.price_tick.scale),
+                    base_notional=fixed(base_notional, self.money_scale),
+                    initial_margin=fixed(position_initial, self.money_scale),
+                    maintenance_margin=fixed(position_maintenance, self.money_scale),
+                )
+            )
+        return PortfolioRiskSnapshot(
+            account_id=account.account_id,
+            event_time=at,
+            base_currency=account.base_currency,
+            nav=account.nav,
+            cash_value=fixed(cash_value, self.money_scale),
+            gross_exposure=fixed(gross_exposure, self.money_scale),
+            net_exposure=fixed(net_exposure, self.money_scale),
+            initial_margin=fixed(initial_margin, self.money_scale),
+            maintenance_margin=fixed(maintenance_margin, self.money_scale),
+            positions=tuple(positions),
+        )
 
     def mark(
         self, event: MarkPriceEvent, *, create_snapshot: bool = True
