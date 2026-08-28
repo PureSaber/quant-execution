@@ -192,37 +192,14 @@ class DeterministicRunEngine:
                                 f"{order.order_id}:{decision.code}:{decision.message}"
                             )
 
-                matched = tuple(self.matching_model.match(event, self.broker.open_orders))
-                for fill in matched:
-                    if fill.fill_id in seen_fill_ids:
-                        raise ValidationError(f"duplicate fill_id: {fill.fill_id}")
-                    order = self._order(fill.order_id)
-                    fill_decision = self.risk_gate.check_fill(fill, order)
-                    if not fill_decision.accepted:
-                        self.broker.expire(
-                            order.order_id,
-                            event_time=event.available_at,
-                            reason=f"{fill_decision.code}: {fill_decision.message}",
-                        )
-                        self.risk_gate.release_order(order)
-                        risk_events.append(
-                            f"{order.order_id}:{fill_decision.code}:{fill_decision.message}"
-                        )
-                        continue
-                    self.broker.apply_fill(fill)
-                    self.risk_gate.release_fill(fill, order)
-                    account_snapshot = self.ledger.apply_with_trading_day(
-                        fill,
-                        trading_day=event.trading_day,
-                        create_snapshot=False,
-                    )
-                    fee = self.risk_gate.fee_for(fill, order)
-                    if fee is not None:
-                        self.ledger.apply(fee, create_snapshot=False)
-                        fees.append(fee)
+                if self._match_and_commit(
+                    event,
+                    fills=fills,
+                    fees=fees,
+                    risk_events=risk_events,
+                    seen_fill_ids=seen_fill_ids,
+                ):
                     account_snapshot = None
-                    seen_fill_ids.add(fill.fill_id)
-                    fills.append(fill)
 
                 self._expire_immediate_orders(event)
                 if type(self.risk_gate).runtime_check is RuleBookRiskGate.runtime_check:
@@ -308,6 +285,136 @@ class DeterministicRunEngine:
         if callable(strategy_reset):
             strategy_reset()
         self.artifacts = None
+
+    def _match_and_commit(
+        self,
+        event: MarketEvent,
+        *,
+        fills: list[Fill],
+        fees: list[Fee],
+        risk_events: list[str],
+        seen_fill_ids: set[str],
+    ) -> bool:
+        """Match one event until every remaining candidate can commit atomically."""
+
+        while True:
+            matching_checkpoint = self._capture_component(self.matching_model)
+            open_orders = self.broker.open_orders
+            matched = tuple(self.matching_model.match(event, open_orders))
+            if not matched:
+                return False
+            self._validate_candidate_fill_ids(matched, seen_fill_ids)
+
+            if len(matched) == 1:
+                fill = matched[0]
+                order = self._order(fill.order_id)
+                # The built-in check is read-only; custom overrides may be stateful.
+                risk_checkpoint = (
+                    None
+                    if type(self.risk_gate).check_fill is RuleBookRiskGate.check_fill
+                    else self._capture_component(self.risk_gate)
+                )
+                decision = self.risk_gate.check_fill(fill, order)
+                if not decision.accepted:
+                    self._restore_component(self.matching_model, matching_checkpoint)
+                    if risk_checkpoint is not None:
+                        self._restore_component(self.risk_gate, risk_checkpoint)
+                    self._expire_fill_rejections(
+                        event,
+                        ((order.order_id, decision.code, decision.message),),
+                        open_orders=open_orders,
+                        risk_events=risk_events,
+                    )
+                    continue
+                fee = self._commit_fill(fill, order, event)
+                if fee is not None:
+                    fees.append(fee)
+                seen_fill_ids.add(fill.fill_id)
+                fills.append(fill)
+                return True
+
+            broker_checkpoint = self._capture_component(self.broker)
+            ledger_checkpoint = self._capture_component(self.ledger)
+            risk_checkpoint = self._capture_component(self.risk_gate)
+            staged_fills: list[Fill] = []
+            staged_fees: list[Fee] = []
+            rejected: dict[str, tuple[str, str]] = {}
+            for fill in matched:
+                order = self._order(fill.order_id)
+                if order.order_id in rejected:
+                    continue
+                decision = self.risk_gate.check_fill(fill, order)
+                if not decision.accepted:
+                    rejected[order.order_id] = (decision.code, decision.message)
+                    continue
+                fee = self._commit_fill(fill, order, event)
+                staged_fills.append(fill)
+                if fee is not None:
+                    staged_fees.append(fee)
+
+            if rejected:
+                self._restore_component(self.matching_model, matching_checkpoint)
+                self._restore_component(self.broker, broker_checkpoint)
+                self._restore_component(self.ledger, ledger_checkpoint)
+                self._restore_component(self.risk_gate, risk_checkpoint)
+                self._expire_fill_rejections(
+                    event,
+                    tuple(
+                        (order_id, code, message) for order_id, (code, message) in rejected.items()
+                    ),
+                    open_orders=open_orders,
+                    risk_events=risk_events,
+                )
+                continue
+
+            fills.extend(staged_fills)
+            fees.extend(staged_fees)
+            seen_fill_ids.update(fill.fill_id for fill in staged_fills)
+            return True
+
+    @staticmethod
+    def _validate_candidate_fill_ids(matched: Sequence[Fill], seen_fill_ids: set[str]) -> None:
+        attempt_fill_ids: set[str] = set()
+        for fill in matched:
+            if fill.fill_id in seen_fill_ids or fill.fill_id in attempt_fill_ids:
+                raise ValidationError(f"duplicate fill_id: {fill.fill_id}")
+            attempt_fill_ids.add(fill.fill_id)
+
+    def _commit_fill(self, fill: Fill, order: Order, event: MarketEvent) -> Fee | None:
+        self.broker.apply_fill(fill)
+        self.risk_gate.release_fill(fill, order)
+        self.ledger.apply_with_trading_day(
+            fill,
+            trading_day=event.trading_day,
+            create_snapshot=False,
+        )
+        fee = self.risk_gate.fee_for(fill, order)
+        if fee is not None:
+            self.ledger.apply(fee, create_snapshot=False)
+        return fee
+
+    def _expire_fill_rejections(
+        self,
+        event: MarketEvent,
+        rejected: Sequence[tuple[str, str, str]],
+        *,
+        open_orders: Sequence[Order],
+        risk_events: list[str],
+    ) -> None:
+        open_order_ids = {order.order_id for order in open_orders}
+        if not rejected:
+            raise ValidationError("fill rejection retry must remove at least one order")
+        for order_id, code, message in rejected:
+            if order_id not in open_order_ids:
+                raise ValidationError("fill rejection references an order outside the match batch")
+            order = self._order(order_id)
+            self.broker.expire(
+                order_id,
+                event_time=event.available_at,
+                reason=f"{code}: {message}",
+            )
+            self.risk_gate.release_order(order)
+            risk_events.append(f"{order_id}:{code}:{message}")
 
     @staticmethod
     def _capture_component(component: object) -> tuple[str, object]:
