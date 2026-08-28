@@ -5,46 +5,48 @@ Recorded on 2026-08-28 with Python 3.12.5 on an AMD Ryzen 7 7800X3D
 
 The benchmark constructs all input events before timing, then measures complete
 `DeterministicRunEngine.replay`, including strategy callbacks, risk checks, matching,
-exact ledger facts and final artifact hashes. Five fresh-engine runs are reported and
-the median is the gate value.
+exact ledger facts and final artifact hashes. Every measured run executes in a fresh
+child process, so throughput caches and peak working-set values cannot leak between
+workloads or repetitions. Three independent runs are reported and the median is the
+gate value.
 
 | Workload | Events | Orders/Fills | Ledger transactions | Median throughput | Peak working set | 50k/s gate |
 |---|---:|---:|---:|---:|---:|---|
-| Deterministic bar replay, no orders | 10,000 | 0/0 | 1 | 146,637.89 events/s | 184.07 MiB | PASS |
-| Bar matching plus exact ledger, stride 40 | 40,000 | 1,000/1,000 | 2,001 | 66,639.97 events/s | 184.07 MiB | PASS |
+| Deterministic bar replay, no orders | 10,000 | 0/0 | 1 | 163,895.20 events/s | 128.46 MiB | PASS |
+| 50%-fill bar matching plus exact ledger | 2,000 | 1,000/1,000 | 2,001 | 10,747.90 events/s | 131.64 MiB | FAIL |
 
-The second workload does not reduce the prior accounting workload: it retains 1,000
-orders, 1,000 fills and 2,001 balanced transactions, distributes them evenly through a
-larger 40,000-event stream, and invokes matching and risk processing for every event.
-Its committed result hash is
-`eb766e55ed1fc2140705808ca1e23c865342eb20c63e3d38a2cc4eaa9098dae1`.
+The dense workload has exactly 2,000 market events, 1,000 orders, 1,000 fills, 2,000
+order events and 2,001 balanced transactions. It invokes strategy, risk, matching,
+ledger mutation and final hashes without padding the denominator with empty events.
+Its deterministic result hash is
+`e638c2cb3a44b4fe4bb9a234b4451a905a63d8bdf611ef1b6c97042e8dc3efb9`.
 The no-order result hash is
 `ccef62b18e9f1c86af29481e29abfed2c09802495293c4fa60e0a49d59532841`.
 
 Reproduce the release gate with:
 
 ```bash
-python benchmarks/benchmark_replay.py --repeat 5
+python benchmarks/benchmark_replay.py --workload all --repeat 3 --require-rate 50000
 ```
 
-The benchmark exits nonzero if either median is below 50,000 events/s or peak working
-set reaches 16 GiB. The workload is configurable rather than hiding fill density. The
-previous dense stress shape can be reproduced explicitly:
+The benchmark exits nonzero if either median is below 50,000 events/s or any independent
+worker reaches 16 GiB. A single workload can be reproduced without changing its facts:
 
 ```bash
-python benchmarks/benchmark_replay.py --no-order-events 1000 --matching-events 2000 --order-stride 2 --repeat 5 --require-rate 0
+python benchmarks/benchmark_replay.py --workload dense --repeat 3 --require-rate 0
 ```
 
-On the same run, that deliberately extreme 50%-fill stream reached 8,806.25 events/s
-while still producing 1,000 fills and 2,001 transactions. This is disclosed as a
-remaining high-fact-density capacity risk; it is not substituted for the release event
-throughput gate.
+The dense median is 39,252.10 events/s below the required threshold, a 78.50% shortfall.
+Profiling identifies the cumulative hot path as immutable order/fill/transaction
+construction, generic ledger translation/posting, repeated risk and open-order
+validation, and final canonical hashing. Low-risk optimizations improved no-order
+replay and removed derivative maintenance calculations from cash-only accounts, but
+they do not close the dense gap. Closing it now requires a separately reviewed integer
+ledger hot path, batch boundary, or compatible native extension; that is a material
+architecture expansion rather than a safe M3a defect fix.
 
-The measured improvement came from removing repeated reporting snapshots from the hot
-risk path, retaining exact decimal risk views, validating unique replay event IDs once,
-including immutable facts without re-canonicalizing them on every mutation, caching
-exact fixed-point conversions and immutable posting values, and retaining complete
-final hashing. No ledger fact, risk check or accounting invariant is disabled.
+No ledger fact, fill, fee, risk check, accounting invariant or final hash is disabled to
+improve the reported number. The 50k/s dense gate therefore remains explicitly failed.
 
 This local baseline is not the planned 10-million-event L2 certification dataset and
 must not be presented as that certification.

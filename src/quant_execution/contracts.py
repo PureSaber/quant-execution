@@ -118,7 +118,7 @@ def _immutable_fixed_point_map(
     return MappingProxyType(result)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class OrderIntent:
     idempotency_key: str
     account_id: str
@@ -167,7 +167,7 @@ class OrderIntent:
             raise ValidationError(f"{self.order_type.value} stop_price requirement violated")
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Order:
     order_id: str
     intent: OrderIntent
@@ -210,7 +210,7 @@ class Order:
         object.__setattr__(self, "filled_quantity", filled)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class OrderEvent:
     event_id: str
     order_id: str
@@ -263,7 +263,7 @@ class OrderEvent:
             raise ValidationError(f"{self.to_status.value} order event requires a reason")
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Fill:
     fill_id: str
     order_id: str
@@ -305,7 +305,7 @@ class Fill:
             )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Fee:
     fee_id: str
     fill_id: str
@@ -328,7 +328,7 @@ class Fee:
         )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Funding:
     funding_id: str
     account_id: str
@@ -350,7 +350,7 @@ class Funding:
         )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Settlement:
     settlement_id: str
     account_id: str
@@ -381,7 +381,7 @@ class Settlement:
         )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Posting:
     ledger_account: str
     currency: str
@@ -406,7 +406,7 @@ class Posting:
             raise ValidationError("quantity_delta must be a FixedPoint or null")
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LedgerTransaction:
     transaction_id: str
     idempotency_key: str
@@ -441,7 +441,7 @@ class LedgerTransaction:
             raise ValidationError(f"ledger transaction is unbalanced: {unbalanced}")
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class AccountSnapshot:
     account_id: str
     event_time: datetime
@@ -485,7 +485,7 @@ class AccountSnapshot:
             )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RiskDecision:
     accepted: bool
     code: str
@@ -499,7 +499,7 @@ class RiskDecision:
             raise ValidationError("message must be a string")
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class RunResult:
     run_id: str
     seed: int

@@ -1,11 +1,13 @@
-"""Reproducible local M3a replay throughput and memory gate."""
+"""Reproducible M3a replay throughput and independent-process memory gate."""
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import statistics
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -27,7 +29,7 @@ from quant_execution.rules import RuleBookRiskGate
 UTC = timezone.utc
 START = datetime(2026, 1, 2, tzinfo=UTC)
 INSTRUMENT = "crypto:benchmark:BTCUSDT"
-ORDER_STRIDE = 40
+DENSE_ORDER_STRIDE = 2
 
 
 def fp(value: str | int, scale: int = 3) -> FixedPoint:
@@ -92,13 +94,10 @@ class NoOrderStrategy:
         return ()
 
 
-class PeriodicOrderStrategy:
-    def __init__(self, order_stride: int = ORDER_STRIDE) -> None:
-        self.order_stride = order_stride
-
+class DenseOrderStrategy:
     def on_event(self, context, event):
         index = int(event.event_id.rsplit("-", 1)[1])
-        if index % self.order_stride:
+        if index % DENSE_ORDER_STRIDE:
             return ()
         return (
             OrderIntent(
@@ -175,66 +174,149 @@ def peak_working_set_bytes() -> int:
     return int(peak if sys.platform == "darwin" else peak * 1024)
 
 
-def measure(name: str, records: tuple[BarEvent, ...], strategy_type, repeat: int) -> dict:
-    rates = []
-    last_engine = None
-    last_result = None
-    for _ in range(repeat):
-        candidate = engine(strategy_type())
-        started = time.perf_counter()
-        result = candidate.replay(records, seed=42)
-        elapsed = time.perf_counter() - started
-        rates.append(len(records) / elapsed)
-        last_engine = candidate
-        last_result = result
-    assert last_engine is not None and last_result is not None
+def worker(workload: str, event_count: int) -> int:
+    strategy = NoOrderStrategy() if workload == "release_no_orders" else DenseOrderStrategy()
+    records = events(event_count)
+    candidate = engine(strategy)
+    gc.collect()
+    started = time.perf_counter()
+    result = candidate.replay(records, seed=42)
+    elapsed = time.perf_counter() - started
+    artifacts = candidate.artifacts
+    assert artifacts is not None
+    payload = {
+        "pid": os.getpid(),
+        "workload": workload,
+        "events": event_count,
+        "orders": result.order_count,
+        "order_events": len(artifacts.order_events),
+        "fills": result.fill_count,
+        "transactions": len(artifacts.ledger_transactions),
+        "fill_density": result.fill_count / event_count,
+        "elapsed_s": elapsed,
+        "events_per_s": event_count / elapsed,
+        "peak_working_set_mib": peak_working_set_bytes() / 1024 / 1024,
+        "order_sha256": result.order_sha256,
+        "fill_sha256": result.fill_sha256,
+        "ledger_sha256": result.ledger_sha256,
+        "result_sha256": result.result_sha256,
+    }
+    if workload == "dense_matching_exact_ledger":
+        expected_orders = event_count // DENSE_ORDER_STRIDE
+        assert payload["orders"] == expected_orders
+        assert payload["order_events"] == expected_orders * 2
+        assert payload["fills"] == expected_orders
+        assert payload["transactions"] == expected_orders * 2 + 1
+        assert payload["fill_density"] == 0.5
+    else:
+        assert payload["orders"] == payload["order_events"] == payload["fills"] == 0
+        assert payload["transactions"] == 1
+        assert payload["fill_density"] == 0
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def run_once(workload: str, event_count: int) -> dict[str, object]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--worker",
+        workload,
+        "--events",
+        str(event_count),
+    ]
+    environment = dict(os.environ)
+    environment["PYTHONHASHSEED"] = "0"
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def aggregate(
+    workload: str,
+    event_count: int,
+    repeat: int,
+    require_rate: float,
+    memory_limit_bytes: int,
+) -> dict[str, object]:
+    runs = [run_once(workload, event_count) for _ in range(repeat)]
+    hashes = {
+        (
+            run["order_sha256"],
+            run["fill_sha256"],
+            run["ledger_sha256"],
+            run["result_sha256"],
+        )
+        for run in runs
+    }
+    if len(hashes) != 1:
+        raise RuntimeError(f"{workload} produced non-deterministic hashes")
+    rates = [float(run["events_per_s"]) for run in runs]
+    peaks = [float(run["peak_working_set_mib"]) for run in runs]
+    representative = runs[0]
+    median_rate = statistics.median(rates)
     return {
-        "workload": name,
-        "events": len(records),
-        "orders": last_result.order_count,
-        "fills": last_result.fill_count,
-        "transactions": len(last_engine.ledger.transactions),
+        "workload": workload,
+        "events": representative["events"],
+        "orders": representative["orders"],
+        "order_events": representative["order_events"],
+        "fills": representative["fills"],
+        "transactions": representative["transactions"],
+        "fill_density": representative["fill_density"],
+        "independent_processes": repeat,
+        "worker_pids": [run["pid"] for run in runs],
         "events_per_s_runs": [round(rate, 2) for rate in rates],
-        "events_per_s_median": round(statistics.median(rates), 2),
-        "result_sha256": last_result.result_sha256,
+        "events_per_s_median": round(median_rate, 2),
+        "peak_working_set_mib_runs": [round(peak, 2) for peak in peaks],
+        "peak_working_set_mib": round(max(peaks), 2),
+        "order_sha256": representative["order_sha256"],
+        "fill_sha256": representative["fill_sha256"],
+        "ledger_sha256": representative["ledger_sha256"],
+        "result_sha256": representative["result_sha256"],
+        "rate_gate": median_rate >= require_rate,
+        "memory_gate": max(peaks) * 1024**2 < memory_limit_bytes,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--no-order-events", type=int, default=10_000)
-    parser.add_argument("--matching-events", type=int, default=40_000)
-    parser.add_argument("--order-stride", type=int, default=ORDER_STRIDE)
-    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--workload", choices=("all", "release", "dense"), default="all")
+    parser.add_argument("--release-events", type=int, default=10_000)
+    parser.add_argument("--dense-events", type=int, default=2_000)
+    parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--require-rate", type=float, default=50_000)
+    parser.add_argument("--memory-limit-gib", type=float, default=16)
+    parser.add_argument("--worker", choices=("release_no_orders", "dense_matching_exact_ledger"))
+    parser.add_argument("--events", type=int)
     args = parser.parse_args()
-    if (
-        args.no_order_events <= 0
-        or args.matching_events <= 0
-        or args.repeat <= 0
-        or args.order_stride <= 1
-    ):
-        parser.error("event counts/repeat must be positive and order-stride must exceed one")
-    if args.matching_events % args.order_stride:
-        parser.error(f"matching-events must be divisible by {args.order_stride}")
-    no_order_records = events(args.no_order_events)
-    matching_records = events(args.matching_events)
+    if args.worker is not None:
+        if args.events is None or args.events <= 0:
+            parser.error("worker events must be positive")
+        if args.worker == "dense_matching_exact_ledger" and args.events % 2:
+            parser.error("dense worker events must be even")
+        return worker(args.worker, args.events)
+    if args.repeat < 3:
+        parser.error("repeat must be at least three")
+    if args.release_events <= 0 or args.dense_events <= 0 or args.dense_events % 2:
+        parser.error("event counts must be positive and dense-events must be even")
+    selected = []
+    if args.workload in {"all", "release"}:
+        selected.append(("release_no_orders", args.release_events))
+    if args.workload in {"all", "dense"}:
+        selected.append(("dense_matching_exact_ledger", args.dense_events))
+    memory_limit = int(args.memory_limit_gib * 1024**3)
     results = [
-        measure("no_orders", no_order_records, NoOrderStrategy, args.repeat),
-        measure(
-            f"bar_matching_exact_ledger_stride_{args.order_stride}",
-            matching_records,
-            lambda: PeriodicOrderStrategy(args.order_stride),
-            args.repeat,
-        ),
+        aggregate(name, count, args.repeat, args.require_rate, memory_limit)
+        for name, count in selected
     ]
-    peak = peak_working_set_bytes()
-    for result in results:
-        result["peak_working_set_mib"] = round(peak / 1024 / 1024, 2)
-        result["rate_gate"] = result["events_per_s_median"] >= args.require_rate
-        result["memory_gate"] = peak < 16 * 1024**3
     print(json.dumps(results, indent=2, sort_keys=True))
-    return 0 if all(result["rate_gate"] and result["memory_gate"] for result in results) else 1
+    return 0 if all(item["rate_gate"] and item["memory_gate"] for item in results) else 1
 
 
 if __name__ == "__main__":

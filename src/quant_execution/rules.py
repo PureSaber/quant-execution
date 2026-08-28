@@ -65,14 +65,14 @@ def _metadata_decimal(
     return value
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MarketState:
     event: MarketEvent
     reference_price: FixedPoint | None
     status: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _RiskAccountView:
     account_id: str
     cash_balances: Mapping[str, FixedPoint | Decimal]
@@ -356,7 +356,7 @@ class RuleBookRiskGate:
     def check_current(self, order_intent: OrderIntent, *, event_time: datetime) -> RiskDecision:
         return self._check(
             order_intent,
-            self._current_view(event_time),
+            self._current_view(event_time, order_intent.instrument_id),
             as_of=order_intent.created_at,
         )
 
@@ -373,10 +373,14 @@ class RuleBookRiskGate:
         remaining_units = order.intent.quantity.units - order.filled_quantity.units
         if remaining_units <= 0:
             return RiskDecision(False, "NO_REMAINING_QUANTITY", "order has no open quantity")
-        remaining_intent = replace(
-            order.intent,
-            quantity=FixedPoint(remaining_units, order.intent.quantity.scale),
-            created_at=event_time,
+        remaining_intent = (
+            order.intent
+            if remaining_units == order.intent.quantity.units
+            else replace(
+                order.intent,
+                quantity=FixedPoint(remaining_units, order.intent.quantity.scale),
+                created_at=event_time,
+            )
         )
         return self._check(remaining_intent, account_snapshot, as_of=event_time)
 
@@ -392,14 +396,18 @@ class RuleBookRiskGate:
         remaining_units = order.intent.quantity.units - order.filled_quantity.units
         if remaining_units <= 0:
             return RiskDecision(False, "NO_REMAINING_QUANTITY", "order has no open quantity")
-        remaining_intent = replace(
-            order.intent,
-            quantity=FixedPoint(remaining_units, order.intent.quantity.scale),
-            created_at=event_time,
+        remaining_intent = (
+            order.intent
+            if remaining_units == order.intent.quantity.units
+            else replace(
+                order.intent,
+                quantity=FixedPoint(remaining_units, order.intent.quantity.scale),
+                created_at=event_time,
+            )
         )
         return self._check(
             remaining_intent,
-            self._current_view(event_time),
+            self._current_view(event_time, order.intent.instrument_id),
             as_of=event_time,
         )
 
@@ -598,9 +606,13 @@ class RuleBookRiskGate:
             amount = decimal(fill.quantity) * unit_notional * rate
         if amount == 0:
             return None
-        raw = f"{fill.fill_id}|{amount}|{fee_type}|{spec.settlement_currency}".encode()
         return Fee(
-            fee_id=f"fee-{hashlib.sha256(raw).hexdigest()[:24]}",
+            fee_id=(
+                "fee-"
+                + hashlib.sha256(
+                    f"{fill.fill_id}|{amount}|{fee_type}|{spec.settlement_currency}".encode()
+                ).hexdigest()[:24]
+            ),
             fill_id=fill.fill_id,
             account_id=fill.account_id,
             amount=fixed(amount, self.money_scale),
@@ -668,7 +680,20 @@ class RuleBookRiskGate:
                 )
         return _ACCEPTED_DECISION
 
-    def _current_view(self, event_time: datetime) -> _RiskAccountView:
+    def _current_view(
+        self, event_time: datetime, instrument_id: str | None = None
+    ) -> _RiskAccountView:
+        spec = self.instruments.get(instrument_id) if instrument_id is not None else None
+        if spec is not None and not self.ledger._is_derivative(spec):
+            currency = spec.quote_currency or spec.settlement_currency
+            position = self.ledger._positions.get(instrument_id)
+            return _RiskAccountView(
+                account_id=self.ledger.account_id,
+                cash_balances={currency: self.ledger.cash_balance(currency)},
+                positions={} if position is None else {instrument_id: position},
+                nav=Decimal(0),
+                initial_margin=Decimal(0),
+            )
         cash, positions, nav, initial_margin = self.ledger.risk_balances(event_time)
         return _RiskAccountView(
             account_id=self.ledger.account_id,

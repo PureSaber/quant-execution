@@ -27,7 +27,9 @@ from quant_execution.contracts import (
     Settlement,
 )
 
-SCHEMA_VERSION = "1.0.0"
+LEGACY_SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
+SUPPORTED_SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION)
 
 ORDER_INTENT_SCHEMA_ID = "puresaber.execution.order-intent"
 ORDER_SCHEMA_ID = "puresaber.execution.order"
@@ -188,6 +190,20 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             pa.field("result_sha256", pa.string(), nullable=False),
         ]
     ),
+}
+
+_ARROW_SCHEMAS_BY_VERSION: dict[str, dict[str, pa.Schema]] = {
+    SCHEMA_VERSION: _ARROW_SCHEMAS,
+    LEGACY_SCHEMA_VERSION: {
+        **_ARROW_SCHEMAS,
+        SETTLEMENT_SCHEMA_ID: pa.schema(
+            [
+                field
+                for field in _ARROW_SCHEMAS[SETTLEMENT_SCHEMA_ID]
+                if field.name != "settlement_price"
+            ]
+        ),
+    },
 }
 
 _FIXED_POINT_JSON = {
@@ -470,6 +486,13 @@ _JSON_SCHEMAS[ORDER_EVENT_SCHEMA_ID]["allOf"] = [
     },
 ]
 
+_LEGACY_JSON_SCHEMAS = deepcopy(_JSON_SCHEMAS)
+del _LEGACY_JSON_SCHEMAS[SETTLEMENT_SCHEMA_ID]["properties"]["settlement_price"]
+_JSON_SCHEMAS_BY_VERSION: dict[str, dict[str, dict[str, Any]]] = {
+    LEGACY_SCHEMA_VERSION: _LEGACY_JSON_SCHEMAS,
+    SCHEMA_VERSION: _JSON_SCHEMAS,
+}
+
 
 def _time(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
@@ -510,7 +533,9 @@ def _fixed_map(values: Mapping[str, FixedPoint]) -> dict[str, dict[str, int]]:
     return {key: _fixed(values[key]) for key in sorted(values)}
 
 
-def execution_payload(value: object) -> dict[str, Any]:
+def execution_payload(value: object, *, version: str = SCHEMA_VERSION) -> dict[str, Any]:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ValidationError(f"Unsupported execution schema version: {version}")
     if isinstance(value, OrderIntent):
         return _intent_payload(value)
     if isinstance(value, Order):
@@ -566,7 +591,7 @@ def execution_payload(value: object) -> dict[str, Any]:
             "event_time": _time(value.event_time),
         }
     if isinstance(value, Settlement):
-        return {
+        payload = {
             "settlement_id": value.settlement_id,
             "account_id": value.account_id,
             "instrument_id": value.instrument_id,
@@ -574,8 +599,15 @@ def execution_payload(value: object) -> dict[str, Any]:
             "currency": value.currency,
             "event_time": _time(value.event_time),
             "settlement_type": value.settlement_type,
-            "settlement_price": _fixed(value.settlement_price),
         }
+        if version == LEGACY_SCHEMA_VERSION:
+            if value.settlement_price is not None:
+                raise ValidationError(
+                    "settlement_price cannot be serialized with schema version 1.0.0"
+                )
+        else:
+            payload["settlement_price"] = _fixed(value.settlement_price)
+        return payload
     if isinstance(value, LedgerTransaction):
         return {
             "transaction_id": value.transaction_id,
@@ -616,19 +648,23 @@ def execution_payload(value: object) -> dict[str, Any]:
 
 
 def get_arrow_schema(schema_id: str, version: str = SCHEMA_VERSION) -> pa.Schema:
-    if version != SCHEMA_VERSION:
-        raise ValidationError(f"Unsupported execution schema: {schema_id}@{version}")
     try:
-        return _ARROW_SCHEMAS[schema_id]
+        schemas = _ARROW_SCHEMAS_BY_VERSION[version]
+    except KeyError as exc:
+        raise ValidationError(f"Unsupported execution schema: {schema_id}@{version}") from exc
+    try:
+        return schemas[schema_id]
     except KeyError as exc:
         raise ValidationError(f"Unknown execution schema ID: {schema_id}") from exc
 
 
 def get_json_schema(schema_id: str, version: str = SCHEMA_VERSION) -> dict[str, Any]:
-    if version != SCHEMA_VERSION:
-        raise ValidationError(f"Unsupported execution schema: {schema_id}@{version}")
     try:
-        return deepcopy(_JSON_SCHEMAS[schema_id])
+        schemas = _JSON_SCHEMAS_BY_VERSION[version]
+    except KeyError as exc:
+        raise ValidationError(f"Unsupported execution schema: {schema_id}@{version}") from exc
+    try:
+        return deepcopy(schemas[schema_id])
     except KeyError as exc:
         raise ValidationError(f"Unknown execution schema ID: {schema_id}") from exc
 
@@ -655,9 +691,13 @@ def validate_json_record(
             raise ValidationError(f"Ledger JSON record is unbalanced: {unbalanced}")
 
 
-def validate_arrow_table(schema_id: str, table: pa.Table, version: str = SCHEMA_VERSION) -> None:
-    expected = get_arrow_schema(schema_id, version)
-    if table.schema != expected:
+def validate_arrow_table(schema_id: str, table: pa.Table, version: str | None = None) -> None:
+    if version is None:
+        expected_versions = SUPPORTED_SCHEMA_VERSIONS
+    else:
+        expected_versions = (version,)
+    expected = tuple(get_arrow_schema(schema_id, candidate) for candidate in expected_versions)
+    if table.schema not in expected:
         raise ValidationError(
             f"Arrow schema mismatch for {schema_id}: expected={expected}, actual={table.schema}"
         )

@@ -179,8 +179,8 @@ class InvalidFillModel:
         fill = Fill(
             fill_id="duplicate",
             order_id="unknown" if self.mode == "unknown" else order.order_id,
-            account_id="account",
-            strategy_id="strategy",
+            account_id="other" if self.mode == "account" else "account",
+            strategy_id="other" if self.mode == "strategy" else "strategy",
             instrument_id=STOCK,
             side=Side.BUY,
             quantity=fp("50"),
@@ -194,10 +194,17 @@ class InvalidFillModel:
 def test_unknown_and_duplicate_fills_fail_closed() -> None:
     strategy = FixtureStrategy({"signal": [Signal(STOCK, Side.BUY, fp("100"), fp("10"))]})
     events = [bar("signal", STOCK, 60, "10"), bar("match", STOCK, 120, "10")]
-    for mode, message in (("unknown", "unknown order"), ("duplicate", "duplicate fill_id")):
+    for mode, message in (
+        ("unknown", "unknown order"),
+        ("duplicate", "duplicate fill_id"),
+        ("account", "fill account differs"),
+        ("strategy", "fill strategy differs"),
+    ):
         engine = manual_engine(strategy, InvalidFillModel(mode))
         with pytest.raises(ReplayError, match=message):
             engine.replay(events, 1)
+        assert engine.broker.orders == ()
+        assert len(engine.ledger.transactions) == 1
 
 
 def test_ioc_fok_expiry_and_latency_noneligibility() -> None:

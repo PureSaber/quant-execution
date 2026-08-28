@@ -45,7 +45,11 @@ as `created_at`; backdating and future-dating are both rejected.
 For identical events, configuration, code and seed, order-event, fill, ledger and
 result hashes are identical across repeated runs.
 
-Daily mark settlement accepts an optional backward-compatible `settlement_price`.
+Daily mark settlement uses an explicitly versioned schema. Serialization defaults to
+`1.1.0`, where `settlement_price` is optional. Passing `version="1.0.0"` emits the
+unchanged legacy payload and rejects a non-null `settlement_price`. JSON readers accept
+legacy payloads under the new optional-field schema; Arrow validation auto-detects the
+exact `1.0.0` or `1.1.0` physical schema unless a version is explicitly requested.
 When `settlement_type` is `daily_mark`, the cash amount must equal mark-to-market PnL
 at that price and the cost basis is reset to the same price, preventing unrealized PnL
 from being counted twice. FX snapshots are UTC-only, conflict-safe and versioned into
@@ -60,11 +64,11 @@ linear perpetual funding. They are regression fixtures, not performance marketin
 python -m ruff check src tests benchmarks
 python -m ruff format --check src tests benchmarks
 python -m pytest --cov=quant_execution --cov-branch --cov-report=term-missing -q
-python benchmarks/benchmark_replay.py --repeat 5
+python benchmarks/benchmark_replay.py --workload all --repeat 3 --require-rate 50000
 ```
 
 The 50k-events/second replay objective is an explicit local performance gate. The
-current no-order and matching-plus-ledger workloads pass it without omitting ledger
-facts or final hashes. The high-fill-density stress result and its remaining capacity
-risk are disclosed separately in
+no-order workload passes; the exact 50%-fill workload remains below the gate while
+retaining all 1,000 fills, 2,001 balanced transactions, risk checks and final hashes.
+The measured shortfall and required follow-up architecture work are disclosed in
 [`docs/performance-m3a.md`](docs/performance-m3a.md).

@@ -119,6 +119,8 @@ def test_broker_fail_closed_validation_and_state_checkpoint_branches() -> None:
         broker.cancel(second.order_id, idempotency_key="same-cancel", created_at=T0)
 
     invalid_fills = (
+        replace(fill(second.order_id, "bad-account", "1", 1), account_id="other"),
+        replace(fill(second.order_id, "bad-strategy", "1", 1), strategy_id="other"),
         replace(fill(second.order_id, "bad-instrument", "1", 1), instrument_id="other"),
         replace(fill(second.order_id, "bad-side", "1", 1), side=Side.SELL),
         replace(fill(second.order_id, "bad-scale", "1", 1), quantity=fp("1", 3)),
@@ -126,6 +128,7 @@ def test_broker_fail_closed_validation_and_state_checkpoint_branches() -> None:
     for bad_fill in invalid_fills:
         with pytest.raises(ValidationError):
             broker.apply_fill(bad_fill)
+        assert broker.get_order(second.order_id).status is OrderStatus.ACCEPTED
 
     checkpoint = broker.capture_state()
     broker.expire(second.order_id, event_time=T0 + timedelta(seconds=2), reason="fixture")
