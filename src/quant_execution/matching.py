@@ -379,8 +379,10 @@ class L2MatchingModel(_BaseMatchingModel):
             self._trigger_stops_from_book(market_event, open_orders)
             return self._consume_book(market_event, open_orders)
         if isinstance(market_event, TradeEvent):
+            taker_fills = self._consume_saved_book(market_event, open_orders)
             self._trigger_stops_from_trade(market_event, open_orders)
-            return self._consume_queues(market_event, open_orders)
+            maker_fills = self._consume_queues(market_event, open_orders)
+            return (*taker_fills, *maker_fills)
         return ()
 
     def _reconcile_queues(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> None:
@@ -611,6 +613,29 @@ class L2MatchingModel(_BaseMatchingModel):
     def _consume_book(
         self, event: BookSnapshotEvent | BookDeltaEvent, orders: Sequence[Order]
     ) -> tuple[Fill, ...]:
+        return self._consume_visible_book(event, orders, skip_queued=False)
+
+    def _consume_saved_book(self, event: TradeEvent, orders: Sequence[Order]) -> tuple[Fill, ...]:
+        """Execute pre-existing takers against the last causally visible book.
+
+        A Trade does not update the authoritative L2 book. Orders that were already
+        resting in a simulated maker queue therefore remain maker candidates, while
+        active orders that could not enter that queue get one taker attempt against a
+        local book copy. This runs before stops are triggered by the current Trade, so
+        a newly triggered stop cannot fill on its trigger event.
+        """
+
+        if event.instrument_id not in self._books:
+            return ()
+        return self._consume_visible_book(event, orders, skip_queued=True)
+
+    def _consume_visible_book(
+        self,
+        event: BookSnapshotEvent | BookDeltaEvent | TradeEvent,
+        orders: Sequence[Order],
+        *,
+        skip_queued: bool,
+    ) -> tuple[Fill, ...]:
         book = self._books[event.instrument_id]
         bids = dict(book["bids"])
         asks = dict(book["asks"])
@@ -624,6 +649,8 @@ class L2MatchingModel(_BaseMatchingModel):
         fills: list[Fill] = []
         for order in self._price_time_orders(orders):
             if not self.eligible(order, event):
+                continue
+            if skip_queued and order.order_id in self._queue_keys:
                 continue
             if (
                 order.intent.order_type in {OrderType.STOP, OrderType.STOP_LIMIT}

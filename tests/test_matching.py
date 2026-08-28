@@ -583,6 +583,200 @@ def test_l2_trade_triggered_stop_limit_starts_on_next_event_and_fills_partially(
     assert [(fill.order_id, fill.quantity) for fill in second_fill] == [(waiting.order_id, fp("1"))]
 
 
+@pytest.mark.parametrize(
+    ("side", "order_type", "stop", "limit", "trigger_price", "book_price"),
+    [
+        (Side.BUY, OrderType.STOP, "105", None, "106", "100"),
+        (Side.BUY, OrderType.STOP_LIMIT, "105", "106", "106", "100"),
+        (Side.SELL, OrderType.STOP, "95", None, "94", "100"),
+        (Side.SELL, OrderType.STOP_LIMIT, "95", "94", "94", "100"),
+    ],
+)
+def test_l2_trade_triggered_stop_takes_saved_book_on_next_trade(
+    side: Side,
+    order_type: OrderType,
+    stop: str,
+    limit: str | None,
+    trigger_price: str,
+    book_price: str,
+) -> None:
+    broker = DeterministicBroker()
+    waiting = order(
+        broker,
+        f"trade-to-trade-{order_type.value}-{side.value}",
+        side=side,
+        quantity="1",
+        order_type=order_type,
+        price=limit,
+        stop=stop,
+    )
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields(f"trade-to-trade-book-{side.value}", ASSET, seconds=1, sequence=105),
+        bids=(BookLevel(fp("99" if side is Side.BUY else "100"), fp("2")),),
+        asks=(BookLevel(fp("100" if side is Side.BUY else "101"), fp("2")),),
+    )
+    assert model.match(snapshot, broker.open_orders) == ()
+    authoritative_book = {
+        "bids": dict(model._books[ASSET]["bids"]),
+        "asks": dict(model._books[ASSET]["asks"]),
+    }
+
+    trigger = TradeEvent(
+        **event_fields(f"trade-to-trade-trigger-{side.value}", ASSET, seconds=2),
+        price=fp(trigger_price),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.BUY if side is Side.BUY else AggressorSide.SELL,
+    )
+    assert model.match(trigger, broker.open_orders) == ()
+
+    next_trade = TradeEvent(
+        **event_fields(f"trade-to-trade-next-{side.value}", ASSET, seconds=3),
+        price=fp(book_price),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.SELL if side is Side.BUY else AggressorSide.BUY,
+    )
+    fills = model.match(next_trade, broker.open_orders)
+    assert [
+        (fill.order_id, fill.quantity, fill.price, fill.liquidity_role.value) for fill in fills
+    ] == [(waiting.order_id, fp("1"), fp(book_price), "taker")]
+    assert model._books[ASSET]["bids"] == authoritative_book["bids"]
+    assert model._books[ASSET]["asks"] == authoritative_book["asks"]
+
+
+@pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+def test_l2_orders_submitted_after_snapshot_take_saved_book_on_next_trade(side: Side) -> None:
+    broker = DeterministicBroker()
+    model = L2MatchingModel({ASSET: instrument()})
+    bid_price = "99" if side is Side.BUY else "100"
+    ask_price = "100" if side is Side.BUY else "101"
+    snapshot = BookSnapshotEvent(
+        **event_fields(f"post-snapshot-book-{side.value}", ASSET, seconds=1, sequence=106),
+        bids=(BookLevel(fp(bid_price), fp("2")),),
+        asks=(BookLevel(fp(ask_price), fp("2")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    market = order(
+        broker,
+        f"post-snapshot-market-{side.value}",
+        side=side,
+        quantity="1",
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.IOC,
+        price=None,
+        created_seconds=2,
+    )
+    marketable_limit = order(
+        broker,
+        f"post-snapshot-limit-{side.value}",
+        side=side,
+        quantity="1",
+        price="101" if side is Side.BUY else "99",
+        created_seconds=2,
+    )
+
+    trade = TradeEvent(
+        **event_fields(f"post-snapshot-trade-{side.value}", ASSET, seconds=3),
+        price=fp("100"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.SELL if side is Side.BUY else AggressorSide.BUY,
+    )
+    fills = model.match(trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity, fill.liquidity_role.value) for fill in fills] == [
+        (market.order_id, fp("1"), "taker"),
+        (marketable_limit.order_id, fp("1"), "taker"),
+    ]
+    assert model._books[ASSET]["bids"] == {fp(bid_price).units: fp("2")}
+    assert model._books[ASSET]["asks"] == {fp(ask_price).units: fp("2")}
+
+
+@pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+def test_l2_saved_book_trade_respects_multilevel_fok_and_ioc(side: Side) -> None:
+    prices = ("100", "101") if side is Side.BUY else ("100", "99")
+    limit = prices[-1]
+
+    def snapshot(event_id: str) -> BookSnapshotEvent:
+        levels = tuple(BookLevel(fp(price), fp("1")) for price in prices)
+        return BookSnapshotEvent(
+            **event_fields(event_id, ASSET, seconds=1, sequence=107),
+            bids=levels if side is Side.SELL else (BookLevel(fp("98"), fp("1")),),
+            asks=levels if side is Side.BUY else (BookLevel(fp("102"), fp("1")),),
+        )
+
+    broker = DeterministicBroker()
+    model = L2MatchingModel({ASSET: instrument()})
+    assert model.match(snapshot(f"saved-book-fok-{side.value}"), ()) == ()
+    fok = order(
+        broker,
+        f"saved-book-fok-order-{side.value}",
+        side=side,
+        quantity="3",
+        price=limit,
+        tif=TimeInForce.FOK,
+        created_seconds=2,
+    )
+    trade = TradeEvent(
+        **event_fields(f"saved-book-fok-trade-{side.value}", ASSET, seconds=3),
+        price=fp(limit),
+        quantity=fp("5"),
+        aggressor_side=AggressorSide.SELL if side is Side.BUY else AggressorSide.BUY,
+    )
+    assert model.match(trade, broker.open_orders) == ()
+    assert fok.order_id not in model._queue_keys
+
+    broker = DeterministicBroker()
+    model.reset()
+    assert model.match(snapshot(f"saved-book-ioc-{side.value}"), ()) == ()
+    ioc = order(
+        broker,
+        f"saved-book-ioc-order-{side.value}",
+        side=side,
+        quantity="3",
+        price=limit,
+        tif=TimeInForce.IOC,
+        created_seconds=2,
+    )
+    fills = model.match(trade, broker.open_orders)
+    assert [(fill.order_id, fill.quantity, fill.price) for fill in fills] == [
+        (ioc.order_id, fp("1"), fp(prices[0])),
+        (ioc.order_id, fp("1"), fp(prices[1])),
+    ]
+    assert sum((fill.quantity.to_decimal() for fill in fills), Decimal(0)) == Decimal(2)
+    assert ioc.order_id not in model._queue_keys
+
+
+def test_l2_saved_book_taker_and_same_trade_maker_share_order_remaining() -> None:
+    broker = DeterministicBroker()
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields("same-trade-taker-maker-book", ASSET, seconds=1, sequence=108),
+        bids=(BookLevel(fp("99"), fp("1")),),
+        asks=(BookLevel(fp("100"), fp("1")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    marketable = order(
+        broker,
+        "same-trade-taker-maker-order",
+        quantity="2",
+        price="101",
+        created_seconds=2,
+    )
+    trade = TradeEvent(
+        **event_fields("same-trade-taker-maker-trade", ASSET, seconds=3),
+        price=fp("101"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    fills = model.match(trade, broker.open_orders)
+    assert [(fill.quantity, fill.price, fill.liquidity_role.value) for fill in fills] == [
+        (fp("1"), fp("100"), "taker"),
+        (fp("1"), fp("101"), "maker"),
+    ]
+    assert sum((fill.quantity.to_decimal() for fill in fills), Decimal(0)) == Decimal(2)
+    assert all(fill.order_id == marketable.order_id for fill in fills)
+    assert model._books[ASSET]["asks"] == {fp("100").units: fp("1")}
+
+
 @pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
 def test_l2_stop_uses_top_of_book_not_deep_levels_on_snapshot_and_delta(side: Side) -> None:
     broker = DeterministicBroker()
