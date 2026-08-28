@@ -74,6 +74,7 @@ def transition_order(
         sequence=next_version,
         from_status=order.status,
         to_status=to_status,
+        fill_quantity=fill_quantity,
         reason=reason,
     )
     return updated, event

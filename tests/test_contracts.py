@@ -96,6 +96,7 @@ def test_order_state_machine_conserves_quantity_and_rejects_illegal_transitions(
         fill_quantity=fp("4"),
     )
     assert partial.from_status is OrderStatus.ACCEPTED
+    assert partial.fill_quantity == fp("4")
     assert order.filled_quantity == fp("4")
     order, _ = transition_order(
         order,
@@ -112,6 +113,7 @@ def test_order_state_machine_conserves_quantity_and_rejects_illegal_transitions(
         fill_quantity=fp("3"),
     )
     assert filled.sequence == 4
+    assert filled.fill_quantity == fp("3")
     assert order.filled_quantity == order.intent.quantity
     with pytest.raises(ValidationError, match="Illegal order transition"):
         transition_order(

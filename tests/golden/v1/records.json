@@ -40,6 +40,7 @@
     "sequence": 1,
     "from_status": "created",
     "to_status": "accepted",
+    "fill_quantity": null,
     "reason": ""
   },
   "puresaber.execution.fill": {
