@@ -57,7 +57,7 @@ class ReplayError(RuntimeError):
     """Replay stopped at the first unsafe or invalid input."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RunArtifacts:
     market_events: tuple[MarketEvent, ...]
     orders: tuple[Order, ...]

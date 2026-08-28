@@ -7,11 +7,13 @@ from decimal import Decimal
 import pytest
 from conftest import T0, event_fields, fp
 from quant_data_kit import (
+    AggressorSide,
     BookLevel,
     BookSnapshotEvent,
     CorporateActionEvent,
     QuoteEvent,
     StatusEvent,
+    TradeEvent,
 )
 from quant_data_kit.exceptions import ValidationError
 from test_ledger import PERP, SPOT, STOCK, fill, mark, perp_spec, spot_spec, stock_spec
@@ -41,6 +43,15 @@ def test_ledger_configuration_metadata_and_fx_fail_closed() -> None:
     with pytest.raises(ValidationError, match="finite"):
         _meta_decimal(infinite, "initial_margin_rate")
     ledger = ExactAccountLedger(account_id="account", base_currency="USD", instruments={})
+    original_hash = ledger.journal_sha256
+    ledger.set_fx_rate("USD", fp("1"), event_time=T0)
+    assert ledger.journal_sha256 == original_hash
+    with pytest.raises(ValidationError, match="exactly one"):
+        ledger.set_fx_rate("USD", fp("2"), event_time=T0)
+    with pytest.raises(ValidationError, match="uppercase currency"):
+        ledger.set_fx_rate("usd", fp("1"), event_time=T0)
+    with pytest.raises(ValidationError, match="uppercase currency"):
+        ExactAccountLedger(account_id="account", base_currency="usd", instruments={})
     with pytest.raises(ValidationError, match="positive"):
         ledger.set_fx_rate("CNY", fp("0"), event_time=T0)
     ledger.set_fx_rate("CNY", fp("0.14", 2), event_time=T0)
@@ -48,6 +59,194 @@ def test_ledger_configuration_metadata_and_fx_fail_closed() -> None:
         ledger.set_fx_rate("CNY", fp("0.15", 2), event_time=T0 - timedelta(seconds=1))
     with pytest.raises(ValidationError, match="not available"):
         ledger._to_base(Decimal(1), "CNY", T0 - timedelta(seconds=1))
+
+
+def test_direct_ledger_mutations_rollback_snapshot_failures_and_unsafe_ratios() -> None:
+    usd_stock = replace(stock_spec(), settlement_currency="USD")
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="USD",
+        instruments={STOCK: usd_stock},
+        initial_cash={"USD": fp("10000")},
+    )
+    ledger.mark(mark(STOCK, "10", 1))
+    ledger.apply_with_trading_day(
+        fill("rollback-stock", STOCK, Side.BUY, "100", "10", seconds=1),
+        trading_day=date(2026, 1, 2),
+    )
+    before = ledger.capture_state()
+    before_hash = ledger.journal_sha256
+    dividend = CorporateActionEvent(
+        **event_fields("eur-dividend", STOCK, seconds=2),
+        action_type="cash_dividend",
+        effective_date=T0.date(),
+        cash_amount=fp("1"),
+        currency="EUR",
+    )
+    with pytest.raises(ValidationError, match="missing FX snapshot"):
+        ledger.apply(dividend)
+    assert ledger.capture_state() == before
+    assert ledger.journal_sha256 == before_hash
+
+    zero_ratio = CorporateActionEvent(
+        **event_fields("zero-ratio", STOCK, seconds=2),
+        action_type="split",
+        effective_date=T0.date(),
+        ratio=fp("0"),
+    )
+    with pytest.raises(ValidationError, match="ratio must be positive"):
+        ledger.apply(zero_ratio, create_snapshot=False)
+    assert ledger.capture_state() == before
+
+    fractional_ratio = CorporateActionEvent(
+        **event_fields("fractional-ratio", STOCK, seconds=2),
+        action_type="split",
+        effective_date=T0.date(),
+        ratio=fp("1.005", 3),
+    )
+    with pytest.raises(ValidationError, match="quantity_step"):
+        ledger.apply(fractional_ratio, create_snapshot=False)
+    assert ledger.capture_state() == before
+
+    eur_ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="USD",
+        instruments={STOCK: replace(usd_stock, settlement_currency="EUR")},
+        initial_cash={"EUR": fp("100")},
+    )
+    mark_before = eur_ledger.capture_state()
+    with pytest.raises(ValidationError, match="missing FX snapshot"):
+        eur_ledger.mark(mark(STOCK, "10", 1))
+    assert eur_ledger.capture_state() == mark_before
+
+
+def test_direct_market_observation_and_event_time_fail_closed_boundaries() -> None:
+    eur_stock = replace(stock_spec(), settlement_currency="EUR")
+    broken = ExactAccountLedger(
+        account_id="account",
+        base_currency="USD",
+        instruments={STOCK: eur_stock},
+        initial_cash={"EUR": fp("100")},
+    )
+    trade = TradeEvent(
+        **event_fields("rollback-trade", STOCK, seconds=2),
+        price=fp("10"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.BUY,
+    )
+    before = broken.capture_state()
+    with pytest.raises(ValidationError, match="missing FX snapshot"):
+        broken.observe_market(trade)
+    assert broken.capture_state() == before
+
+    prior_mark = (Decimal(9), T0, "prior")
+    broken._marks[STOCK] = prior_mark
+    before = broken.capture_state()
+    with pytest.raises(ValidationError, match="missing FX snapshot"):
+        broken.mark(mark(STOCK, "11", 3))
+    assert broken.capture_state() == before
+    with pytest.raises(ValidationError, match="missing FX snapshot"):
+        broken.observe_market(trade, trusted_unique=True)
+    assert broken.capture_state() == before
+
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="USDT",
+        instruments={SPOT: spot_spec(), STOCK: replace(stock_spec(), settlement_currency="USDT")},
+        initial_cash={"USDT": fp("1000")},
+    )
+    synthetic = TradeEvent(
+        **event_fields("synthetic", SPOT, seconds=1),
+        price=fp("100"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.BUY,
+    )
+    ledger.observe_market(synthetic, create_snapshot=False)
+    assert ledger.observe_market(synthetic, create_snapshot=False) is None
+    with pytest.raises(ValidationError, match="different content"):
+        ledger.observe_market(replace(synthetic, price=fp("101")), create_snapshot=False)
+    assert ledger.observe_market(mark(SPOT, "100", 2), create_snapshot=False) is None
+    with pytest.raises(ValidationError, match="ledger event time moved backwards"):
+        ledger.mark(mark(STOCK, "10", 1), create_snapshot=False)
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        ledger.snapshot(T0.replace(tzinfo=None))
+
+
+def test_direct_apply_rejects_invalid_day_currency_cash_and_backwards_time() -> None:
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="USDT",
+        instruments={SPOT: spot_spec()},
+        initial_cash={"USDT": fp("200")},
+    )
+    ledger.mark(mark(SPOT, "100", 1))
+    bought = fill("boundary-buy", SPOT, Side.BUY, "1", "100", seconds=1)
+    ledger.apply_with_trading_day(bought, trading_day=date(2026, 1, 2))
+    with pytest.raises(ValidationError, match="requires a trading_day"):
+        ledger._apply(
+            fill("missing-day", SPOT, Side.BUY, "1", "100", seconds=2),
+            trading_day=None,
+            create_snapshot=False,
+        )
+    with pytest.raises(ValidationError, match="trading_day must be a date"):
+        ledger.apply_with_trading_day(
+            fill("bad-day", SPOT, Side.BUY, "1", "100", seconds=2),
+            trading_day=T0,
+        )
+    with pytest.raises(ValidationError, match="fee currency"):
+        ledger.apply(
+            Fee(
+                fee_id="wrong-currency",
+                fill_id=bought.fill_id,
+                account_id="account",
+                amount=fp("1"),
+                currency="CNY",
+                event_time=T0 + timedelta(seconds=2),
+                fee_type="commission",
+            )
+        )
+    with pytest.raises(ValidationError, match="negative cash"):
+        ledger.apply(
+            Fee(
+                fee_id="too-large",
+                fill_id=bought.fill_id,
+                account_id="account",
+                amount=fp("101"),
+                currency="USDT",
+                event_time=T0 + timedelta(seconds=2),
+                fee_type="commission",
+            )
+        )
+    before = ledger.capture_state()
+    with pytest.raises(ValidationError, match="event time moved backwards"):
+        ledger.apply(
+            Funding(
+                funding_id="backwards",
+                account_id="account",
+                instrument_id=SPOT,
+                amount=fp("1"),
+                currency="USDT",
+                event_time=T0,
+            ),
+            create_snapshot=False,
+        )
+    assert ledger.capture_state() == before
+    with pytest.raises(ValidationError, match="missing close allocation"):
+        ledger.close_allocation("missing")
+
+    derivative = ExactAccountLedger(
+        account_id="account",
+        base_currency="USDT",
+        instruments={PERP: perp_spec()},
+        initial_cash={"USDT": fp("10000")},
+    )
+    derivative.mark(mark(PERP, "100", 1))
+    derivative.apply_with_trading_day(
+        fill("risk-derivative", PERP, Side.BUY, "1", "100", seconds=1),
+        trading_day=date(2026, 1, 2),
+        create_snapshot=False,
+    )
+    assert derivative.risk_balances(T0 + timedelta(seconds=1))[3] > 0
 
 
 def test_mark_identity_time_and_market_event_price_sources() -> None:

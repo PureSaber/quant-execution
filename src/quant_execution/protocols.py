@@ -21,7 +21,7 @@ from quant_execution.contracts import (
 )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class StrategyContext:
     run_id: str
     account_id: str

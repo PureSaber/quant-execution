@@ -72,6 +72,18 @@ def test_metadata_and_generic_rule_fail_closed_branches() -> None:
         gate.check(intent(STOCK, Side.BUY, "100", key="lower", price="7"), ledger.snapshot()).code
         == "PRICE_BELOW_LIMIT"
     )
+    direct_spot = RuleBookRiskGate._rule(specs()[SPOT])
+    no_reference = MarketState(status, None, "open")
+    assert (
+        direct_spot.check(
+            market_intent(SPOT, key="spot-no-reference"),
+            ledger.snapshot(),
+            no_reference,
+            specs()[SPOT],
+            ledger,
+        ).code
+        == "NO_REFERENCE_PRICE"
+    )
 
 
 def test_gate_identity_pit_lifecycle_steps_status_and_configuration() -> None:
@@ -243,6 +255,15 @@ def test_open_order_cash_and_margin_reservations_release_exactly() -> None:
     second = intent(STOCK, Side.BUY, "6000", key="cash-2", price="10")
     assert stock_gate.check(first, stock_ledger.snapshot()).accepted
     stock_gate.reserve(first)
+    expected_cash = stock_gate._cash_reservations[first.idempotency_key]
+    stock_gate._cash_reservations[first.idempotency_key] = (
+        expected_cash[0],
+        expected_cash[1] + 1,
+        expected_cash[2],
+    )
+    with pytest.raises(ValidationError, match="different cash requirement"):
+        stock_gate.reserve(first)
+    stock_gate._cash_reservations[first.idempotency_key] = expected_cash
     assert stock_gate.check(second, stock_ledger.snapshot()).code == "INSUFFICIENT_AVAILABLE_CASH"
     broker = DeterministicBroker()
     first_order = broker.submit(first)
@@ -275,6 +296,14 @@ def test_open_order_cash_and_margin_reservations_release_exactly() -> None:
     margin2 = intent(FUTURE, Side.BUY, "1", key="margin-2", price="4000")
     assert future_gate.check(margin1, future_ledger.snapshot()).accepted
     future_gate.reserve(margin1)
+    expected_margin = future_gate._margin_reservations[margin1.idempotency_key]
+    future_gate._margin_reservations[margin1.idempotency_key] = (
+        expected_margin[0] + 1,
+        expected_margin[1],
+    )
+    with pytest.raises(ValidationError, match="different margin requirement"):
+        future_gate.reserve(margin1)
+    future_gate._margin_reservations[margin1.idempotency_key] = expected_margin
     assert (
         future_gate.check(margin2, future_ledger.snapshot()).code == "INSUFFICIENT_AVAILABLE_MARGIN"
     )

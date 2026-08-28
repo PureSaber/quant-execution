@@ -22,10 +22,9 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check src tests benchmarks
       - run: python -m ruff format --check src tests benchmarks
-      - run: python -m pytest --cov=quant_execution --cov-branch --cov-report=term-missing -q
+      - run: python -m pytest --cov=quant_execution --cov-branch --cov-report=term-missing --cov-report=json:coverage.json -q
+      - run: python -m coverage report --fail-under=80
       - name: Enforce core branch coverage
-        shell: bash
-        run: |
-          for module in broker contracts engine matching state_machine ledger rules; do
-            python -m coverage report --include="*/${module}.py" --fail-under=90
-          done
+        run: >-
+          python tools/check_branch_coverage.py coverage.json --threshold 90
+          broker contracts schemas engine matching state_machine ledger rules

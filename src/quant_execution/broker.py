@@ -189,6 +189,10 @@ class DeterministicBroker:
         order = self._require_order(fill.order_id)
         if order.status not in {OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED}:
             raise ValidationError("fill references an order that is not open")
+        if fill.account_id != order.intent.account_id:
+            raise ValidationError("fill account differs from order intent")
+        if fill.strategy_id != order.intent.strategy_id:
+            raise ValidationError("fill strategy differs from order intent")
         if fill.instrument_id != order.intent.instrument_id:
             raise ValidationError("fill instrument differs from order intent")
         if fill.side is not order.intent.side:

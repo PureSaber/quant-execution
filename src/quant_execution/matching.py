@@ -526,10 +526,14 @@ class L2MatchingModel(_BaseMatchingModel):
         book = self._books.get(trade.instrument_id)
         if book is not None and trade.price.scale != int(book["price_scale"]):
             raise ValidationError("L2 trade price scale differs from snapshot price scale")
-        available = decimal(trade.quantity)
+        # Every resting order stores its absolute queue position at this price level:
+        # visible market volume plus earlier simulated orders. A trade consumes the
+        # level once. Applying the same shrinking ``available`` value to every order
+        # would charge the first order's queue-ahead again to later orders.
+        traded_at_level = decimal(trade.quantity)
         fills: list[Fill] = []
         for order in _price_time_orders(orders):
-            if available <= 0 or not self.eligible(order, trade):
+            if traded_at_level <= 0 or not self.eligible(order, trade):
                 continue
             if order.order_id not in self._queue_ahead:
                 continue
@@ -545,16 +549,14 @@ class L2MatchingModel(_BaseMatchingModel):
             ):
                 continue
             ahead = self._queue_ahead[order.order_id]
-            consumed_ahead = min(ahead, available)
-            ahead -= consumed_ahead
-            available -= consumed_ahead
-            self._queue_ahead[order.order_id] = ahead
-            if available <= 0 or ahead > 0:
+            executable = max(Decimal(0), traded_at_level - ahead)
+            self._queue_ahead[order.order_id] = max(Decimal(0), ahead - traded_at_level)
+            if executable <= 0:
                 continue
             remaining = decimal(remaining_quantity(order))
-            if order.intent.time_in_force is TimeInForce.FOK and remaining > available:
+            if order.intent.time_in_force is TimeInForce.FOK and remaining > executable:
                 continue
-            quantity = _quantity_from_available(order, available)
+            quantity = _quantity_from_available(order, min(remaining, executable))
             if quantity.units <= 0:
                 continue
             fills.append(
@@ -568,5 +570,4 @@ class L2MatchingModel(_BaseMatchingModel):
                     len(fills),
                 )
             )
-            available -= decimal(quantity)
         return tuple(fills)

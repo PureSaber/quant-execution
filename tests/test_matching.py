@@ -211,3 +211,28 @@ def test_l2_fails_closed_on_sequence_gap() -> None:
     )
     with pytest.raises(ValidationError, match="sequence gap"):
         model.match(bad, [])
+
+
+def test_l2_same_price_trade_consumes_shared_queue_once_in_price_time_order() -> None:
+    broker = DeterministicBroker()
+    first = order(broker, "same-price-first", quantity="1", price="99")
+    second = order(broker, "same-price-second", quantity="1", price="99")
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields("same-price-book", ASSET, seconds=1, sequence=20),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(snapshot, [first, second]) == ()
+    trade = TradeEvent(
+        **event_fields("same-price-trade", ASSET, seconds=2, sequence=21),
+        price=fp("99"),
+        quantity=fp("7"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    fills = model.match(trade, [first, second])
+    expected = sorted((first, second), key=lambda item: (item.intent.created_at, item.order_id))
+    assert [(item.order_id, item.quantity) for item in fills] == [
+        (expected[0].order_id, fp("1")),
+        (expected[1].order_id, fp("1")),
+    ]

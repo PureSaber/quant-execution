@@ -38,6 +38,7 @@ from quant_execution.contracts import (
     Posting,
     Settlement,
     Side,
+    _currency,
 )
 from quant_execution.schemas import execution_payload
 
@@ -91,8 +92,13 @@ class ExactAccountLedger:
         if not 0 <= money_scale <= 18:
             raise ValidationError("money_scale must be in [0, 18]")
         self.account_id = account_id
-        self.base_currency = base_currency
+        self.base_currency = _currency(base_currency, "base_currency")
         self.instruments = dict(instruments)
+        self._derivative_instruments = frozenset(
+            instrument_id
+            for instrument_id, spec in self.instruments.items()
+            if self._is_derivative(spec)
+        )
         self.money_scale = money_scale
         self._initial_cash = dict(initial_cash or {})
         self._initial_fx = dict(fx_to_base or {})
@@ -205,10 +211,16 @@ class ExactAccountLedger:
         return hashlib.sha256(_canonical(payload)).hexdigest()
 
     def set_fx_rate(self, currency: str, rate: FixedPoint, *, event_time: datetime) -> None:
+        currency = _currency(currency)
         event_time = ensure_utc_datetime(event_time, field="event_time")
         value = decimal(rate)
         if value <= 0:
             raise ValidationError("FX rate must be positive")
+        if currency == self.base_currency:
+            if value != 1:
+                raise ValidationError("base currency FX rate must remain exactly one")
+            # The base unit is an invariant rather than a versioned market quote.
+            return
         prior = self._fx.get(currency)
         if prior is not None:
             if event_time < prior[1]:
@@ -223,7 +235,11 @@ class ExactAccountLedger:
     def convert_to_base(
         self, amount: Decimal | FixedPoint, currency: str, *, event_time: datetime
     ) -> Decimal:
-        return self._to_base(amount, currency, event_time)
+        return self._to_base(
+            amount,
+            _currency(currency),
+            ensure_utc_datetime(event_time, field="event_time"),
+        )
 
     def cash_balance(self, currency: str) -> Decimal:
         return self._accounts.get(("assets:cash", currency, None), Decimal(0))
@@ -232,6 +248,7 @@ class ExactAccountLedger:
         self, event_time: datetime
     ) -> tuple[dict[str, Decimal], dict[str, Decimal], Decimal, Decimal]:
         """Return exact decimal balances needed by the hot pre-trade risk path."""
+        event_time = ensure_utc_datetime(event_time, field="event_time")
         cash = {
             currency: amount
             for (account, currency, instrument_id), amount in self._accounts.items()
@@ -279,14 +296,27 @@ class ExactAccountLedger:
         current = self._marks.get(event.instrument_id)
         if current is not None and event.available_at < current[1]:
             raise ValidationError("mark price time moved backwards")
-        self._marks[event.instrument_id] = (
-            decimal(event.price),
-            event.available_at,
-            event.event_id,
-        )
-        self._mark_fingerprints[event.event_id] = event
-        self._event_time = max(self._event_time, event.available_at)
-        return self.snapshot(event.available_at) if create_snapshot else None
+        if event.available_at < self._event_time:
+            raise ValidationError("ledger event time moved backwards")
+        prior_mark = self._marks.get(event.instrument_id)
+        prior_time = self._event_time
+        try:
+            self._marks[event.instrument_id] = (
+                decimal(event.price),
+                event.available_at,
+                event.event_id,
+            )
+            self._mark_fingerprints[event.event_id] = event
+            self._event_time = max(self._event_time, event.available_at)
+            return self.snapshot(event.available_at) if create_snapshot else None
+        except Exception:
+            if prior_mark is None:
+                self._marks.pop(event.instrument_id, None)
+            else:
+                self._marks[event.instrument_id] = prior_mark
+            self._mark_fingerprints.pop(event.event_id, None)
+            self._event_time = prior_time
+            raise
 
     def observe_market(
         self,
@@ -320,15 +350,38 @@ class ExactAccountLedger:
         current = self._marks.get(event.instrument_id)
         if current is not None and event.available_at < current[1]:
             raise ValidationError("mark price time moved backwards")
-        self._marks[event.instrument_id] = (decimal(price), event.available_at, synthetic_id)
-        if not trusted_unique:
-            self._mark_fingerprints[synthetic_id] = event
-        self._event_time = max(self._event_time, event.available_at)
-        return self.snapshot(event.available_at) if create_snapshot else None
+        if event.available_at < self._event_time:
+            raise ValidationError("ledger event time moved backwards")
+        prior_mark = self._marks.get(event.instrument_id)
+        prior_time = self._event_time
+        try:
+            self._marks[event.instrument_id] = (decimal(price), event.available_at, synthetic_id)
+            if not trusted_unique:
+                self._mark_fingerprints[synthetic_id] = event
+            self._event_time = max(self._event_time, event.available_at)
+            return self.snapshot(event.available_at) if create_snapshot else None
+        except Exception:
+            if prior_mark is None:
+                self._marks.pop(event.instrument_id, None)
+            else:
+                self._marks[event.instrument_id] = prior_mark
+            if not trusted_unique:
+                self._mark_fingerprints.pop(synthetic_id, None)
+            self._event_time = prior_time
+            raise
 
     def liquidation_required(self, event_time: datetime | None = None) -> bool:
         """Evaluate the maintenance boundary without materializing reporting maps."""
-        at = event_time or self._event_time
+        at = (
+            ensure_utc_datetime(event_time, field="event_time")
+            if event_time is not None
+            else self._event_time
+        )
+        if not any(
+            quantity and instrument_id in self._derivative_instruments
+            for instrument_id, quantity in self._positions.items()
+        ):
+            return False
         nav = sum(
             (
                 self._to_base(amount, currency, at)
@@ -389,32 +442,47 @@ class ExactAccountLedger:
             if isinstance(event, Fill) and self._fill_trading_days[event.fill_id] != trading_day:
                 raise ValidationError("fill trading_day changed across idempotent application")
             return self.snapshot(self._event_time) if create_snapshot else None
+        event_time = (
+            event.available_at if isinstance(event, CorporateActionEvent) else event.event_time
+        )
+        if event_time < self._event_time:
+            raise ValidationError("ledger event time moved backwards")
+        settlement_price: Decimal | None = None
         lot_update: tuple[list[tuple[date, Decimal]], Decimal, Decimal] | None = None
         if isinstance(event, Fill):
             if trading_day is None:
                 raise ValidationError("fill application requires a trading_day")
             lot_update = self._prepare_lot_update(event, trading_day)
-        transaction = self._translate(event)
-        self._post(transaction)
-        if isinstance(event, Fill):
-            self._fills[event.fill_id] = event
-            self._fill_trading_days[event.fill_id] = trading_day
-            assert lot_update is not None
-            lots, prior_close, today_close = lot_update
-            self._position_lots[event.instrument_id] = lots
-            self._fill_close_allocations[event.fill_id] = (prior_close, today_close)
         elif isinstance(event, Settlement) and event.settlement_type == "daily_mark":
             settlement_price = self._settlement_price(event)
-            self._marks[event.instrument_id] = (
-                settlement_price,
-                event.event_time,
-                event.settlement_id,
-            )
-        elif isinstance(event, CorporateActionEvent) and event.ratio is not None:
-            self._apply_split_state(event)
-        self._event_fingerprints[reference_id] = event
-        self._event_time = max(self._event_time, transaction.event_time)
-        return self.snapshot(transaction.event_time) if create_snapshot else None
+        elif isinstance(event, CorporateActionEvent):
+            self._validate_corporate_action(event)
+        checkpoint = self.capture_state() if create_snapshot else None
+        try:
+            transaction = self._translate(event)
+            self._post(transaction)
+            if isinstance(event, Fill):
+                self._fills[event.fill_id] = event
+                self._fill_trading_days[event.fill_id] = trading_day
+                assert lot_update is not None
+                lots, prior_close, today_close = lot_update
+                self._position_lots[event.instrument_id] = lots
+                self._fill_close_allocations[event.fill_id] = (prior_close, today_close)
+            elif isinstance(event, Settlement) and settlement_price is not None:
+                self._marks[event.instrument_id] = (
+                    settlement_price,
+                    event.event_time,
+                    event.settlement_id,
+                )
+            elif isinstance(event, CorporateActionEvent) and event.ratio is not None:
+                self._apply_split_state(event)
+            self._event_fingerprints[reference_id] = event
+            self._event_time = transaction.event_time
+            return self.snapshot(transaction.event_time) if create_snapshot else None
+        except Exception:
+            if checkpoint is not None:
+                self.restore_state(checkpoint)
+            raise
 
     def apply_with_trading_day(
         self,
@@ -472,7 +540,11 @@ class ExactAccountLedger:
         )
 
     def snapshot(self, event_time: datetime | None = None) -> AccountSnapshot:
-        at = event_time or self._event_time
+        at = (
+            ensure_utc_datetime(event_time, field="event_time")
+            if event_time is not None
+            else self._event_time
+        )
         cash: dict[str, FixedPoint] = {}
         for (account, currency, instrument_id), amount in self._accounts.items():
             if account == "assets:cash" and instrument_id is None:
@@ -621,6 +693,21 @@ class ExactAccountLedger:
                 mark[0] / ratio,
                 event.available_at,
                 event.event_id,
+            )
+
+    def _validate_corporate_action(self, event: CorporateActionEvent) -> None:
+        spec = self._spec(event.instrument_id)
+        if event.ratio is None:
+            return
+        ratio = decimal(event.ratio)
+        if ratio <= 0:
+            raise ValidationError("corporate action ratio must be positive")
+        step = decimal(spec.quantity_step)
+        quantity = self._positions.get(event.instrument_id, Decimal(0))
+        new_quantity = quantity * ratio
+        if new_quantity % step:
+            raise ValidationError(
+                "corporate action quantity is not aligned to instrument quantity_step"
             )
 
     def _translate(self, event: LedgerEvent) -> LedgerTransaction:
@@ -970,19 +1057,43 @@ class ExactAccountLedger:
     def _post(self, transaction: LedgerTransaction) -> None:
         if transaction.idempotency_key in self._transaction_keys:
             raise ValidationError("duplicate ledger transaction idempotency key")
-        for posting in transaction.postings:
-            key = (posting.ledger_account, posting.currency, posting.instrument_id)
-            self._accounts[key] = self._accounts.get(key, Decimal(0)) + decimal(posting.amount)
-            if (
-                posting.ledger_account == "assets:position"
-                and posting.instrument_id is not None
-                and posting.quantity_delta is not None
-            ):
-                self._positions[posting.instrument_id] = self._positions.get(
-                    posting.instrument_id, Decimal(0)
-                ) + decimal(posting.quantity_delta)
-        self._transactions.append(transaction)
-        self._transaction_keys.add(transaction.idempotency_key)
+        missing = object()
+        prior_accounts: dict[tuple[str, str, str | None], Decimal | object] = {}
+        prior_positions: dict[str, Decimal | object] = {}
+        try:
+            for posting in transaction.postings:
+                key = (posting.ledger_account, posting.currency, posting.instrument_id)
+                prior_accounts.setdefault(key, self._accounts.get(key, missing))
+                self._accounts[key] = self._accounts.get(key, Decimal(0)) + decimal(posting.amount)
+                if (
+                    posting.ledger_account == "assets:position"
+                    and posting.instrument_id is not None
+                    and posting.quantity_delta is not None
+                ):
+                    instrument_id = posting.instrument_id
+                    prior_positions.setdefault(
+                        instrument_id, self._positions.get(instrument_id, missing)
+                    )
+                    self._positions[instrument_id] = self._positions.get(
+                        instrument_id, Decimal(0)
+                    ) + decimal(posting.quantity_delta)
+            self._transactions.append(transaction)
+            self._transaction_keys.add(transaction.idempotency_key)
+        except Exception:
+            for key, value in prior_accounts.items():
+                if value is missing:
+                    self._accounts.pop(key, None)
+                else:
+                    self._accounts[key] = value
+            for instrument_id, value in prior_positions.items():
+                if value is missing:
+                    self._positions.pop(instrument_id, None)
+                else:
+                    self._positions[instrument_id] = value
+            if self._transactions and self._transactions[-1] is transaction:
+                self._transactions.pop()
+            self._transaction_keys.discard(transaction.idempotency_key)
+            raise
 
     def _event_identity(self, event: LedgerEvent) -> str:
         if isinstance(event, CorporateActionEvent):
