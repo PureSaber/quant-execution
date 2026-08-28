@@ -339,6 +339,9 @@ def test_mark_identity_time_and_market_event_price_sources() -> None:
     ledger.observe_market(book)
     status = StatusEvent(**event_fields("status", SPOT, seconds=5), status="open", reason="")
     assert ledger.observe_market(status).event_time == status.available_at
+    assert ledger.settlement_from_market(status) is None
+    with pytest.raises(ValidationError, match="derivative"):
+        ledger.settlement_from_market(replace(status, status="daily_settlement"))
 
 
 def test_trading_day_idempotency_account_spec_and_cash_short_guards() -> None:

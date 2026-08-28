@@ -70,5 +70,5 @@ def event_fields(
         "source": "fixture",
         "trading_day": trading_day,
         "session_id": f"session:{trading_day.isoformat()}",
-        "sequence": sequence,
+        "sequence": seconds if sequence is None else sequence,
     }
