@@ -360,7 +360,9 @@ class L2MatchingModel(_BaseMatchingModel):
         self.reset()
 
     def reset(self) -> None:
+        # Vendor facts remain authoritative; only the overlay records simulated taker use.
         self._books: dict[str, dict[str, dict[int, FixedPoint] | int]] = {}
+        self._liquidity_books: dict[str, dict[str, dict[int, FixedPoint] | int]] = {}
         self._queue_ahead: dict[str, Decimal] = {}
         self._queue_keys: dict[str, tuple[str, Side, int, int]] = {}
         self._queue_priority: dict[str, tuple[datetime, datetime, str]] = {}
@@ -415,7 +417,7 @@ class L2MatchingModel(_BaseMatchingModel):
         for order in self._price_time_orders(open_orders):
             if order.order_id in self._queue_keys or not self.eligible(order, market_event):
                 continue
-            book = self._books.get(order.intent.instrument_id)
+            book = self._liquidity_books.get(order.intent.instrument_id)
             if book is not None:
                 self._queue_passive_order(order, book)
 
@@ -564,17 +566,28 @@ class L2MatchingModel(_BaseMatchingModel):
         price_scales = {level.price.scale for level in (*event.bids, *event.asks)}
         if len(price_scales) != 1:
             raise ValidationError("L2 snapshot price levels must use one price scale")
-        self._books[event.instrument_id] = {
+        book: dict[str, dict[int, FixedPoint] | int] = {
             "bids": {level.price.units: level.quantity for level in event.bids},
             "asks": {level.price.units: level.quantity for level in event.asks},
             "price_scale": event.bids[0].price.scale,
             "sequence": int(event.sequence),
+        }
+        self._books[event.instrument_id] = book
+        bids = book["bids"]
+        asks = book["asks"]
+        assert isinstance(bids, dict) and isinstance(asks, dict)
+        self._liquidity_books[event.instrument_id] = {
+            "bids": dict(bids),
+            "asks": dict(asks),
+            "price_scale": int(book["price_scale"]),
+            "sequence": int(book["sequence"]),
         }
         self._clear_instrument_queues(event.instrument_id)
 
     def _apply_delta(self, event: BookDeltaEvent) -> None:
         try:
             book = self._books[event.instrument_id]
+            liquidity_book = self._liquidity_books[event.instrument_id]
         except KeyError as exc:
             raise ValidationError("L2 matching requires a BookSnapshot before deltas") from exc
         if int(book["sequence"]) != event.previous_sequence:
@@ -583,9 +596,17 @@ class L2MatchingModel(_BaseMatchingModel):
             raise ValidationError("L2 delta price scale differs from snapshot price scale")
         side_name = "bids" if event.side is BookSide.BID else "asks"
         side = book[side_name]
-        assert isinstance(side, dict)
+        liquidity_side = liquidity_book[side_name]
+        assert isinstance(side, dict) and isinstance(liquidity_side, dict)
         previous = side.get(event.price.units)
+        previous_liquidity = liquidity_side.get(event.price.units)
         previous_quantity = decimal(previous) if isinstance(previous, FixedPoint) else Decimal(0)
+        previous_liquidity_quantity = (
+            decimal(previous_liquidity)
+            if isinstance(previous_liquidity, FixedPoint)
+            else Decimal(0)
+        )
+        consumed_gap = max(Decimal(0), previous_quantity - previous_liquidity_quantity)
         if event.action is BookAction.DELETE:
             if event.price.units not in side:
                 raise ValidationError("L2 delete references an absent price level")
@@ -594,21 +615,47 @@ class L2MatchingModel(_BaseMatchingModel):
         else:
             side[event.price.units] = event.quantity
             current_quantity = decimal(event.quantity)
+        current_liquidity = max(Decimal(0), current_quantity - consumed_gap)
+        if current_liquidity == 0:
+            liquidity_side.pop(event.price.units, None)
+        else:
+            quantity_scale = max(
+                event.quantity.scale,
+                previous.scale if isinstance(previous, FixedPoint) else 0,
+                previous_liquidity.scale if isinstance(previous_liquidity, FixedPoint) else 0,
+            )
+            liquidity_side[event.price.units] = fixed(
+                current_liquidity,
+                quantity_scale,
+                rounding=None,
+            )
         decrease = max(Decimal(0), previous_quantity - current_quantity)
         if decrease:
             expected_side = Side.BUY if event.side is BookSide.BID else Side.SELL
-            for order_id in tuple(self._queue_ahead):
-                if self._queue_keys.get(order_id) != (
-                    event.instrument_id,
-                    expected_side,
-                    event.price.units,
-                    event.price.scale,
-                ):
-                    continue
-                self._queue_ahead[order_id] = max(
-                    Decimal(0), self._queue_ahead[order_id] - decrease
-                )
+            self._advance_queues(
+                event.instrument_id,
+                expected_side,
+                event.price.units,
+                event.price.scale,
+                decrease,
+            )
         book["sequence"] = int(event.sequence)
+        liquidity_book["sequence"] = int(event.sequence)
+
+    def _advance_queues(
+        self,
+        instrument_id: str,
+        side: Side,
+        price_units: int,
+        price_scale: int,
+        quantity: Decimal,
+    ) -> None:
+        key = (instrument_id, side, price_units, price_scale)
+        for order_id in tuple(self._queue_ahead):
+            if self._queue_keys.get(order_id) == key:
+                self._queue_ahead[order_id] = max(
+                    Decimal(0), self._queue_ahead[order_id] - quantity
+                )
 
     def _consume_book(
         self, event: BookSnapshotEvent | BookDeltaEvent, orders: Sequence[Order]
@@ -621,11 +668,12 @@ class L2MatchingModel(_BaseMatchingModel):
         A Trade does not update the authoritative L2 book. Orders that were already
         resting in a simulated maker queue therefore remain maker candidates, while
         active orders that could not enter that queue get one taker attempt against a
-        local book copy. This runs before stops are triggered by the current Trade, so
-        a newly triggered stop cannot fill on its trigger event.
+        persistent consumable view of the latest book. This runs before stops are
+        triggered by the current Trade, so a newly triggered stop cannot fill on its
+        trigger event.
         """
 
-        if event.instrument_id not in self._books:
+        if event.instrument_id not in self._liquidity_books:
             return ()
         return self._consume_visible_book(event, orders, skip_queued=True)
 
@@ -636,7 +684,7 @@ class L2MatchingModel(_BaseMatchingModel):
         *,
         skip_queued: bool,
     ) -> tuple[Fill, ...]:
-        book = self._books[event.instrument_id]
+        book = self._liquidity_books[event.instrument_id]
         bids = dict(book["bids"])
         asks = dict(book["asks"])
         scale = int(book["price_scale"])
@@ -689,6 +737,14 @@ class L2MatchingModel(_BaseMatchingModel):
                     )
                 )
                 filled += decimal(quantity)
+                resting_side = Side.SELL if order.intent.side is Side.BUY else Side.BUY
+                self._advance_queues(
+                    event.instrument_id,
+                    resting_side,
+                    price_units,
+                    scale,
+                    decimal(quantity),
+                )
                 opposite[price_units] = fixed(
                     decimal(opposite[price_units]) - decimal(quantity),
                     opposite[price_units].scale,
@@ -708,6 +764,8 @@ class L2MatchingModel(_BaseMatchingModel):
                     local_book,
                     remaining=remaining_after,
                 )
+        book["bids"] = bids
+        book["asks"] = asks
         return tuple(fills)
 
     def _book_marketable(self, order: Order, price_units: int, scale: int) -> bool:
