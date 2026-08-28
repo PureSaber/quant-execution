@@ -15,13 +15,14 @@ from quant_data_kit import (
     BookLevel,
     BookSide,
     BookSnapshotEvent,
+    FixedPoint,
     QuoteEvent,
     TradeEvent,
 )
 from quant_data_kit.exceptions import ValidationError
 
 import quant_execution.matching as matching_module
-from quant_execution import OrderIntent, OrderType, Side, TimeInForce
+from quant_execution import LiquidityRole, OrderIntent, OrderType, Side, TimeInForce
 from quant_execution.broker import DeterministicBroker
 from quant_execution.matching import BarMatchingModel, L2MatchingModel, TradeBBOModel
 
@@ -1613,3 +1614,187 @@ def test_l2_new_passive_order_queues_against_the_new_overlay(event_type: str) ->
         expected = Decimal(3)
     assert model.match(event, [passive]) == ()
     assert model._queue_ahead[passive.order_id] == expected
+
+
+def _invalid_scale_passive_order(broker: DeterministicBroker, key: str):
+    return broker.submit(
+        OrderIntent(
+            idempotency_key=key,
+            account_id="account",
+            strategy_id="strategy",
+            instrument_id=ASSET,
+            side=Side.SELL,
+            quantity=fp("1"),
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            created_at=T0 + timedelta(seconds=2),
+            limit_price=FixedPoint.from_decimal(Decimal("100.005"), 3),
+        )
+    )
+
+
+@pytest.mark.parametrize("event_type", ["snapshot", "delta", "trade"])
+@pytest.mark.parametrize("invalid_first", [False, True], ids=["valid-first", "invalid-first"])
+def test_l2_reconciliation_validation_is_atomic_for_event_and_all_new_orders(
+    event_type: str,
+    invalid_first: bool,
+) -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    initial = BookSnapshotEvent(
+        **event_fields("reconcile-atomic-base", ASSET, seconds=1, sequence=380),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(initial, ()) == ()
+    broker = DeterministicBroker()
+    valid = order(
+        broker,
+        f"reconcile-atomic-valid-{event_type}-{invalid_first}",
+        side=Side.SELL,
+        quantity="1",
+        price="100",
+        created_seconds=2,
+    )
+    invalid = _invalid_scale_passive_order(
+        broker,
+        f"reconcile-atomic-invalid-{event_type}-{invalid_first}",
+    )
+    if event_type == "snapshot":
+        event = BookSnapshotEvent(
+            **event_fields("reconcile-atomic-snapshot", ASSET, seconds=3, sequence=381),
+            bids=(BookLevel(fp("98"), fp("4")),),
+            asks=(BookLevel(fp("101"), fp("4")),),
+        )
+    elif event_type == "delta":
+        event = BookDeltaEvent(
+            **event_fields("reconcile-atomic-delta", ASSET, seconds=3, sequence=381),
+            side=BookSide.BID,
+            action=BookAction.UPSERT,
+            price=fp("99"),
+            quantity=fp("4"),
+            previous_sequence=380,
+        )
+    else:
+        event = TradeEvent(
+            **event_fields("reconcile-atomic-trade", ASSET, seconds=3),
+            price=fp("100"),
+            quantity=fp("1"),
+            aggressor_side=AggressorSide.SELL,
+        )
+    candidates = [invalid, valid] if invalid_first else [valid, invalid]
+    before = pickle.dumps(model.capture_state(), protocol=5)
+    with pytest.raises(ValidationError, match="cannot be represented"):
+        model.match(event, candidates)
+    assert pickle.dumps(model.capture_state(), protocol=5) == before
+    assert valid.order_id not in model._queue_keys
+    assert invalid.order_id not in model._queue_keys
+
+
+@pytest.mark.parametrize("prior_change", ["remove", "remaining-release"])
+def test_l2_failed_reconciliation_does_not_commit_prior_queue_release(prior_change: str) -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    broker = DeterministicBroker()
+    first = order(
+        broker,
+        f"reconcile-release-first-{prior_change}",
+        quantity="2",
+        price="99",
+    )
+    later = order(
+        broker,
+        f"reconcile-release-later-{prior_change}",
+        quantity="1",
+        price="99",
+        created_seconds=1,
+    )
+    initial = BookSnapshotEvent(
+        **event_fields(f"reconcile-release-book-{prior_change}", ASSET, seconds=2, sequence=390),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(initial, broker.open_orders) == ()
+    assert model._queue_ahead[later.order_id] == Decimal(7)
+    invalid = _invalid_scale_passive_order(
+        broker,
+        f"reconcile-release-invalid-{prior_change}",
+    )
+    if prior_change == "remove":
+        candidates = [later, invalid]
+    else:
+        external_event = TradeEvent(
+            **event_fields("reconcile-release-external", ASSET, seconds=3),
+            price=fp("99"),
+            quantity=fp("1"),
+            aggressor_side=AggressorSide.SELL,
+        )
+        external_fill = model._fill(
+            "external",
+            external_event,
+            first,
+            fp("1"),
+            fp("99"),
+            LiquidityRole.MAKER,
+            0,
+        )
+        broker.apply_fill(external_fill)
+        candidates = list(broker.open_orders)
+    event = TradeEvent(
+        **event_fields(f"reconcile-release-failure-{prior_change}", ASSET, seconds=4),
+        price=fp("100"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.BUY,
+    )
+    before = pickle.dumps(model.capture_state(), protocol=5)
+    with pytest.raises(ValidationError, match="cannot be represented"):
+        model.match(event, candidates)
+    assert pickle.dumps(model.capture_state(), protocol=5) == before
+    assert model._queue_remaining[first.order_id] == Decimal(2)
+    assert model._queue_ahead[later.order_id] == Decimal(7)
+
+
+def test_l2_post_stop_validation_failure_discards_all_staged_state(monkeypatch) -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    initial = BookSnapshotEvent(
+        **event_fields("post-stop-atomic-base", ASSET, seconds=1, sequence=400),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(initial, ()) == ()
+    broker = DeterministicBroker()
+    passive = order(
+        broker,
+        "post-stop-atomic-passive",
+        side=Side.SELL,
+        quantity="1",
+        price="101",
+        created_seconds=2,
+    )
+    dormant = order(
+        broker,
+        "post-stop-atomic-dormant",
+        quantity="1",
+        order_type=OrderType.STOP,
+        tif=TimeInForce.FOK,
+        price=None,
+        stop="105",
+        created_seconds=2,
+    )
+    event = TradeEvent(
+        **event_fields("post-stop-atomic-trade", ASSET, seconds=3),
+        price=fp("106"),
+        quantity=fp("1"),
+        aggressor_side=AggressorSide.BUY,
+    )
+
+    def fail_after_stop(*args, **kwargs):
+        raise ValidationError("injected post-stop validation failure")
+
+    before = model.capture_state()
+    monkeypatch.setattr(model, "_consume_queues", fail_after_stop)
+    with pytest.raises(ValidationError, match="post-stop validation failure"):
+        model.match(event, [passive, dormant])
+    after = model.capture_state()
+    after.pop("_consume_queues")
+    assert after == before
+    assert passive.order_id not in model._queue_keys
+    assert dormant.order_id not in model._triggered_stops
