@@ -146,6 +146,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             pa.field("currency", pa.string(), nullable=False),
             pa.field("event_time", _UTC, nullable=False),
             pa.field("settlement_type", pa.string(), nullable=False),
+            pa.field("settlement_price", _FIXED_POINT, nullable=True),
         ]
     ),
     LEDGER_TRANSACTION_SCHEMA_ID: pa.schema(
@@ -363,8 +364,9 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "currency": _CURRENCY,
             "event_time": _UTC_JSON,
             "settlement_type": _TEXT,
+            "settlement_price": _NULLABLE_FIXED_POINT_JSON,
         },
-        list(_ARROW_SCHEMAS[SETTLEMENT_SCHEMA_ID].names),
+        [name for name in _ARROW_SCHEMAS[SETTLEMENT_SCHEMA_ID].names if name != "settlement_price"],
     ),
     LEDGER_TRANSACTION_SCHEMA_ID: _object_schema(
         {
@@ -572,6 +574,7 @@ def execution_payload(value: object) -> dict[str, Any]:
             "currency": value.currency,
             "event_time": _time(value.event_time),
             "settlement_type": value.settlement_type,
+            "settlement_price": _fixed(value.settlement_price),
         }
     if isinstance(value, LedgerTransaction):
         return {

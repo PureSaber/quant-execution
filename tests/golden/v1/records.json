@@ -80,7 +80,8 @@
     "amount": {"units": 2000, "scale": 2},
     "currency": "CNY",
     "event_time": "2026-01-02T07:00:00Z",
-    "settlement_type": "daily_mark"
+    "settlement_type": "daily_mark",
+    "settlement_price": null
   },
   "puresaber.execution.ledger-transaction": {
     "transaction_id": "tx-1",

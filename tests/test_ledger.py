@@ -162,13 +162,15 @@ def test_perpetual_funding_settlement_margin_and_liquidation_boundary() -> None:
             settlement_id="settle-1",
             account_id="account",
             instrument_id=PERP,
-            amount=fp("5"),
+            amount=fp("200"),
             currency="USDT",
             event_time=T0 + timedelta(seconds=4),
             settlement_type="daily_mark",
+            settlement_price=fp("110"),
         )
     )
-    assert settled.nav.to_decimal() == Decimal(1183)
+    assert settled.nav.to_decimal() == Decimal(1178)
+    assert settled.unrealized_pnl[PERP].to_decimal() == 0
     ledger.mark(mark(PERP, "1", 5))
     crashed = ledger.snapshot()
     assert crashed.liquidation_required

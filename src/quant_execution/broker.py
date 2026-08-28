@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import date, datetime
 
 from quant_data_kit import FixedPoint
@@ -39,8 +40,32 @@ class DeterministicBroker:
         self._open_order_ids: set[str] = set()
         self._submit_keys: dict[str, tuple[str, str]] = {}
         self._cancel_keys: dict[str, tuple[str, OrderEvent]] = {}
+        self._fill_keys: dict[str, tuple[Fill, OrderEvent]] = {}
         self._events: list[OrderEvent] = []
         self._accepted_day: dict[str, date] = {}
+
+    def capture_state(self) -> dict[str, object]:
+        return deepcopy(
+            {
+                "orders": self._orders,
+                "open_order_ids": self._open_order_ids,
+                "submit_keys": self._submit_keys,
+                "cancel_keys": self._cancel_keys,
+                "fill_keys": self._fill_keys,
+                "events": self._events,
+                "accepted_day": self._accepted_day,
+            }
+        )
+
+    def restore_state(self, state: dict[str, object]) -> None:
+        restored = deepcopy(state)
+        self._orders = restored["orders"]
+        self._open_order_ids = restored["open_order_ids"]
+        self._submit_keys = restored["submit_keys"]
+        self._cancel_keys = restored["cancel_keys"]
+        self._fill_keys = restored["fill_keys"]
+        self._events = restored["events"]
+        self._accepted_day = restored["accepted_day"]
 
     @property
     def orders(self) -> tuple[Order, ...]:
@@ -155,6 +180,12 @@ class DeterministicBroker:
         return event
 
     def apply_fill(self, fill: Fill) -> OrderEvent:
+        prior = self._fill_keys.get(fill.fill_id)
+        if prior is not None:
+            prior_fill, prior_event = prior
+            if prior_fill != fill:
+                raise ValidationError("fill_id reused with different fill content")
+            return prior_event
         order = self._require_order(fill.order_id)
         if order.status not in {OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED}:
             raise ValidationError("fill references an order that is not open")
@@ -181,6 +212,7 @@ class DeterministicBroker:
         if target is OrderStatus.FILLED:
             self._open_order_ids.remove(order.order_id)
         self._events.append(event)
+        self._fill_keys[fill.fill_id] = (fill, event)
         return event
 
     def expire(self, order_id: str, *, event_time: datetime, reason: str) -> OrderEvent:
