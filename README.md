@@ -5,7 +5,7 @@ PureSaber quantitative research, backtesting, and paper trading.
 
 This project never sends live orders.
 
-## v0.2.0 simulation runtime
+## v0.3.0 simulation runtime
 
 The frozen M1 contracts remain compatible and are now backed by:
 
@@ -25,6 +25,9 @@ The frozen M1 contracts remain compatible and are now backed by:
   margin and NAV are derived from balanced `LedgerTransaction` records;
 - `InstrumentSpec`-driven A-share/ETF, domestic futures, crypto spot and
   USDT linear perpetual rules, fees and pre/in-run risk checks.
+- replay-time opening entries dated at the first causally available market event,
+  with explicit derivative `StatusEvent(status="daily_settlement")` conversion into
+  auditable `Settlement` facts exposed by `RunArtifacts.settlements`.
 
 This package is strictly for research, backtesting and paper trading. It has no
 broker credentials, network order adapter or live-order transmission path. L2 queue

@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from quant_data_kit import (
@@ -33,6 +34,7 @@ from quant_execution.contracts import (
     OrderIntent,
     OrderStatus,
     RunResult,
+    Settlement,
     TimeInForce,
 )
 from quant_execution.ledger import ExactAccountLedger
@@ -64,6 +66,7 @@ class RunArtifacts:
     order_events: tuple[OrderEvent, ...]
     fills: tuple[Fill, ...]
     fees: tuple[Fee, ...]
+    settlements: tuple[Settlement, ...]
     ledger_transactions: tuple[LedgerTransaction, ...]
     risk_events: tuple[str, ...]
     result: RunResult
@@ -91,7 +94,7 @@ def _event_sort_key(event: MarketEvent) -> tuple[object, ...]:
         event.source,
         event.instrument_id,
         event.session_id,
-        -1 if event.sequence is None else event.sequence,
+        event.sequence,
         event.event_id,
     )
 
@@ -134,7 +137,7 @@ class DeterministicRunEngine:
         checkpoint = self._capture_state()
         event: MarketEvent | None = None
         try:
-            self._reset()
+            self._reset(opened_at=events[0].available_at if events else None)
             context = StrategyContext(
                 run_id=self.run_id,
                 account_id=self.account_id,
@@ -144,6 +147,7 @@ class DeterministicRunEngine:
             )
             fills: list[Fill] = []
             fees: list[Fee] = []
+            settlements: list[Settlement] = []
             risk_events: list[str] = []
             seen_fill_ids: set[str] = set()
             for event in events:
@@ -162,6 +166,11 @@ class DeterministicRunEngine:
                     funding = self.ledger.funding_from_market(event)
                     if funding is not None:
                         account_snapshot = self.ledger.apply(funding, create_snapshot=False)
+                elif isinstance(event, StatusEvent):
+                    settlement = self.ledger.settlement_from_market(event)
+                    if settlement is not None:
+                        account_snapshot = self.ledger.apply(settlement, create_snapshot=False)
+                        settlements.append(settlement)
 
                 if self.broker.open_orders:
                     for order in self.broker.open_orders:
@@ -265,6 +274,7 @@ class DeterministicRunEngine:
                 order_events=self.broker.order_events,
                 fills=tuple(fills),
                 fees=tuple(fees),
+                settlements=tuple(settlements),
                 ledger_transactions=self.ledger.transactions,
                 risk_events=tuple(risk_events),
                 result=result,
@@ -274,9 +284,9 @@ class DeterministicRunEngine:
             self._restore_state(checkpoint)
             raise ReplayError(f"replay failed closed during finalization: {exc}") from exc
 
-    def _reset(self) -> None:
+    def _reset(self, *, opened_at: datetime | None = None) -> None:
         self.broker.reset()
-        self.ledger.reset()
+        self.ledger.reset(opened_at=opened_at)
         reset = getattr(self.matching_model, "reset", None)
         if callable(reset):
             reset()
