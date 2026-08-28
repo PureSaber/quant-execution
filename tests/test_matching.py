@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 from datetime import timedelta
 from decimal import Decimal
 
@@ -19,6 +20,7 @@ from quant_data_kit import (
 )
 from quant_data_kit.exceptions import ValidationError
 
+import quant_execution.matching as matching_module
 from quant_execution import OrderIntent, OrderType, Side, TimeInForce
 from quant_execution.broker import DeterministicBroker
 from quant_execution.matching import BarMatchingModel, L2MatchingModel, TradeBBOModel
@@ -1227,3 +1229,387 @@ def test_l2_liquidity_overlay_is_captured_and_restored() -> None:
     model.restore_state(checkpoint)
     assert model._liquidity_books[ASSET]["asks"] == {fp("100").units: fp("2")}
     assert len(model.match(trade, broker.open_orders)) == 1
+
+
+@pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+@pytest.mark.parametrize("order_type", [OrderType.MARKET, OrderType.STOP, OrderType.STOP_LIMIT])
+@pytest.mark.parametrize(
+    ("level_quantities", "expected_total"),
+    [
+        (("0.335", "0.335", "0.335"), Decimal(0)),
+        (("0.33", "0.33", "0.34"), Decimal(1)),
+        (("0.33", "0.33", "0.33"), Decimal(0)),
+    ],
+    ids=["per-level-rounding-short", "exact", "one-order-unit-short"],
+)
+def test_l2_fok_uses_an_atomic_exact_fixed_point_execution_plan(
+    side: Side,
+    order_type: OrderType,
+    level_quantities: tuple[str, str, str],
+    expected_total: Decimal,
+) -> None:
+    registry = {
+        ASSET: spec(
+            ASSET,
+            asset_class=AssetClass.CRYPTO,
+            product_type="spot",
+            settlement_currency="USDT",
+            base_currency="BTC",
+            quote_currency="USDT",
+            quantity_step="0.001",
+        )
+    }
+    model = L2MatchingModel(registry)
+    snapshot = BookSnapshotEvent(
+        **event_fields(
+            f"fok-plan-book-{side.value}-{order_type.value}-{expected_total}",
+            ASSET,
+            seconds=1,
+            sequence=300,
+        ),
+        bids=tuple(
+            BookLevel(fp(price), fp(quantity, 3))
+            for price, quantity in zip(("100", "99", "98"), level_quantities, strict=True)
+        ),
+        asks=tuple(
+            BookLevel(fp(price), fp(quantity, 3))
+            for price, quantity in zip(("101", "102", "103"), level_quantities, strict=True)
+        ),
+    )
+    assert model.match(snapshot, ()) == ()
+    broker = DeterministicBroker()
+    waiting = order(
+        broker,
+        f"fok-plan-order-{side.value}-{order_type.value}-{expected_total}",
+        side=side,
+        quantity="1.00",
+        order_type=order_type,
+        tif=TimeInForce.FOK,
+        price=None
+        if order_type in {OrderType.MARKET, OrderType.STOP}
+        else ("103" if side is Side.BUY else "98"),
+        stop=None if order_type is OrderType.MARKET else ("105" if side is Side.BUY else "95"),
+        created_seconds=2,
+    )
+    if order_type in {OrderType.STOP, OrderType.STOP_LIMIT}:
+        trigger = TradeEvent(
+            **event_fields(
+                f"fok-plan-trigger-{side.value}-{order_type.value}-{expected_total}",
+                ASSET,
+                seconds=3,
+            ),
+            price=fp("106" if side is Side.BUY else "94"),
+            quantity=fp("1"),
+            aggressor_side=AggressorSide.BUY if side is Side.BUY else AggressorSide.SELL,
+        )
+        assert model.match(trigger, [waiting]) == ()
+        match_seconds = 4
+    else:
+        match_seconds = 3
+
+    before = pickle.dumps(model.capture_state(), protocol=5)
+    match_event = TradeEvent(
+        **event_fields(
+            f"fok-plan-match-{side.value}-{order_type.value}-{expected_total}",
+            ASSET,
+            seconds=match_seconds,
+        ),
+        price=fp("101" if side is Side.BUY else "100"),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.SELL if side is Side.BUY else AggressorSide.BUY,
+    )
+    fills = tuple(model.match(match_event, [waiting]))
+    total = sum((fill.quantity.to_decimal() for fill in fills), Decimal(0))
+    assert total == expected_total
+    if expected_total == 0:
+        assert fills == ()
+        assert pickle.dumps(model.capture_state(), protocol=5) == before
+    else:
+        expected_prices = (
+            [Decimal(101), Decimal(102), Decimal(103)]
+            if side is Side.BUY
+            else [Decimal(100), Decimal(99), Decimal(98)]
+        )
+        assert [fill.price.to_decimal() for fill in fills] == expected_prices
+        assert [fill.quantity.to_decimal() for fill in fills] == [
+            Decimal(value) for value in level_quantities
+        ]
+
+
+@pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+@pytest.mark.parametrize("order_type", [OrderType.MARKET, OrderType.STOP, OrderType.STOP_LIMIT])
+def test_l2_ioc_reuses_execution_plan_and_keeps_quantized_partial_fill(
+    side: Side,
+    order_type: OrderType,
+) -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields(f"ioc-plan-book-{side.value}-{order_type.value}", ASSET, sequence=310),
+        bids=tuple(BookLevel(fp(price), fp("0.335", 3)) for price in ("100", "99", "98")),
+        asks=tuple(BookLevel(fp(price), fp("0.335", 3)) for price in ("101", "102", "103")),
+    )
+    assert model.match(snapshot, ()) == ()
+    broker = DeterministicBroker()
+    waiting = order(
+        broker,
+        f"ioc-plan-order-{side.value}-{order_type.value}",
+        side=side,
+        quantity="1.00",
+        order_type=order_type,
+        tif=TimeInForce.IOC,
+        price=None
+        if order_type in {OrderType.MARKET, OrderType.STOP}
+        else ("103" if side is Side.BUY else "98"),
+        stop=None if order_type is OrderType.MARKET else ("105" if side is Side.BUY else "95"),
+    )
+    if order_type in {OrderType.STOP, OrderType.STOP_LIMIT}:
+        trigger = TradeEvent(
+            **event_fields(f"ioc-plan-trigger-{side.value}-{order_type.value}", ASSET, seconds=1),
+            price=fp("106" if side is Side.BUY else "94"),
+            quantity=fp("1"),
+            aggressor_side=AggressorSide.BUY if side is Side.BUY else AggressorSide.SELL,
+        )
+        assert model.match(trigger, [waiting]) == ()
+        match_seconds = 2
+    else:
+        match_seconds = 1
+    match_event = TradeEvent(
+        **event_fields(
+            f"ioc-plan-match-{side.value}-{order_type.value}", ASSET, seconds=match_seconds
+        ),
+        price=fp("101" if side is Side.BUY else "100"),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.SELL if side is Side.BUY else AggressorSide.BUY,
+    )
+    fills = model.match(match_event, [waiting])
+    assert sum((fill.quantity.to_decimal() for fill in fills), Decimal(0)) == Decimal("0.99")
+
+
+def test_l2_failed_fok_leaves_all_overlay_for_next_exact_order() -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields("fok-shared-overlay-book", ASSET, seconds=1, sequence=320),
+        bids=(BookLevel(fp("100"), fp("1")),),
+        asks=tuple(BookLevel(fp(price), fp("0.335", 3)) for price in ("101", "102", "103")),
+    )
+    assert model.match(snapshot, ()) == ()
+    broker = DeterministicBroker()
+    rejected = order(
+        broker,
+        "fok-shared-overlay-rejected",
+        quantity="1.00",
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.FOK,
+        price=None,
+        created_seconds=2,
+    )
+    accepted = broker.submit(
+        OrderIntent(
+            idempotency_key="fok-shared-overlay-accepted",
+            account_id="account",
+            strategy_id="strategy",
+            instrument_id=ASSET,
+            side=Side.BUY,
+            quantity=fp("1.005", 3),
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.FOK,
+            created_at=T0 + timedelta(seconds=3),
+        )
+    )
+    event = TradeEvent(
+        **event_fields("fok-shared-overlay-match", ASSET, seconds=4),
+        price=fp("101"),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.SELL,
+    )
+    fills = tuple(model.match(event, [rejected, accepted]))
+    assert {fill.order_id for fill in fills} == {accepted.order_id}
+    assert sum((fill.quantity.to_decimal() for fill in fills), Decimal(0)) == Decimal("1.005")
+    assert model._liquidity_books[ASSET]["asks"] == {}
+
+
+@pytest.mark.parametrize("failure", ["sequence-gap", "price-scale", "delete-absent"])
+def test_l2_invalid_delta_is_atomic_before_queue_reconciliation(failure: str) -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields(f"invalid-delta-base-{failure}", ASSET, seconds=1, sequence=330),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    broker = DeterministicBroker()
+    passive = order(
+        broker,
+        f"invalid-delta-passive-{failure}",
+        side=Side.SELL,
+        quantity="1",
+        price="100",
+        created_seconds=2,
+    )
+    if failure == "sequence-gap":
+        event = BookDeltaEvent(
+            **event_fields("invalid-delta-sequence", ASSET, seconds=3, sequence=332),
+            side=BookSide.ASK,
+            action=BookAction.UPSERT,
+            price=fp("100"),
+            quantity=fp("6"),
+            previous_sequence=331,
+        )
+        message = "sequence gap"
+    elif failure == "price-scale":
+        event = BookDeltaEvent(
+            **event_fields("invalid-delta-scale", ASSET, seconds=3, sequence=331),
+            side=BookSide.ASK,
+            action=BookAction.UPSERT,
+            price=fp("100", 3),
+            quantity=fp("6"),
+            previous_sequence=330,
+        )
+        message = "price scale"
+    else:
+        event = BookDeltaEvent(
+            **event_fields("invalid-delta-absent", ASSET, seconds=3, sequence=331),
+            side=BookSide.ASK,
+            action=BookAction.DELETE,
+            price=fp("101"),
+            quantity=fp("0"),
+            previous_sequence=330,
+        )
+        message = "absent price level"
+    before = pickle.dumps(model.capture_state(), protocol=5)
+    with pytest.raises(ValidationError, match=message):
+        model.match(event, [passive])
+    assert pickle.dumps(model.capture_state(), protocol=5) == before
+    assert passive.order_id not in model._queue_keys
+
+
+def test_l2_snapshot_mixed_price_scale_is_atomic_before_queue_reconciliation() -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    valid = BookSnapshotEvent(
+        **event_fields("invalid-snapshot-base", ASSET, seconds=1, sequence=340),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(valid, ()) == ()
+    invalid = BookSnapshotEvent(
+        **event_fields("invalid-snapshot-mixed", ASSET, seconds=3, sequence=341),
+        bids=(BookLevel(fp("99"), fp("4")),),
+        asks=(BookLevel(fp("100"), fp("4")),),
+    )
+    object.__setattr__(invalid, "asks", (BookLevel(fp("100", 3), fp("4")),))
+    broker = DeterministicBroker()
+    passive = order(broker, "invalid-snapshot-passive", side=Side.SELL, price="100")
+    before = pickle.dumps(model.capture_state(), protocol=5)
+    with pytest.raises(ValidationError, match="one price scale"):
+        model.match(invalid, [passive])
+    assert pickle.dumps(model.capture_state(), protocol=5) == before
+    assert passive.order_id not in model._queue_keys
+
+
+def test_l2_trade_price_scale_mismatch_is_atomic_before_taker_stop_and_queue_changes() -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields("invalid-trade-base", ASSET, seconds=1, sequence=350),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    broker = DeterministicBroker()
+    passive = order(broker, "invalid-trade-passive", side=Side.SELL, price="100")
+    taker = order(
+        broker,
+        "invalid-trade-taker",
+        quantity="1",
+        order_type=OrderType.MARKET,
+        price=None,
+    )
+    dormant = order(
+        broker,
+        "invalid-trade-stop",
+        quantity="1",
+        order_type=OrderType.STOP,
+        tif=TimeInForce.FOK,
+        price=None,
+        stop="105",
+    )
+    invalid = TradeEvent(
+        **event_fields("invalid-trade-scale", ASSET, seconds=2),
+        price=fp("106", 3),
+        quantity=fp("10"),
+        aggressor_side=AggressorSide.BUY,
+    )
+    before = pickle.dumps(model.capture_state(), protocol=5)
+    with pytest.raises(ValidationError, match="price scale"):
+        model.match(invalid, [passive, taker, dormant])
+    assert pickle.dumps(model.capture_state(), protocol=5) == before
+    assert passive.order_id not in model._queue_keys
+    assert dormant.order_id not in model._triggered_stops
+
+
+def test_l2_delta_fixed_point_staging_failure_precedes_all_state_commits(monkeypatch) -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    snapshot = BookSnapshotEvent(
+        **event_fields("delta-stage-base", ASSET, seconds=1, sequence=360),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(snapshot, ()) == ()
+    broker = DeterministicBroker()
+    passive = order(broker, "delta-stage-passive", side=Side.SELL, price="100")
+    event = BookDeltaEvent(
+        **event_fields("delta-stage-failure", ASSET, seconds=2, sequence=361),
+        side=BookSide.ASK,
+        action=BookAction.UPSERT,
+        price=fp("100"),
+        quantity=fp("6"),
+        previous_sequence=360,
+    )
+
+    def fail_fixed_point(*args, **kwargs):
+        raise ValidationError("injected FixedPoint staging failure")
+
+    monkeypatch.setattr(matching_module, "fixed", fail_fixed_point)
+    before = pickle.dumps(model.capture_state(), protocol=5)
+    with pytest.raises(ValidationError, match="injected FixedPoint staging failure"):
+        model.match(event, [passive])
+    assert pickle.dumps(model.capture_state(), protocol=5) == before
+    assert passive.order_id not in model._queue_keys
+
+
+@pytest.mark.parametrize("event_type", ["snapshot", "delta"])
+def test_l2_new_passive_order_queues_against_the_new_overlay(event_type: str) -> None:
+    model = L2MatchingModel({ASSET: instrument()})
+    initial = BookSnapshotEvent(
+        **event_fields(f"new-overlay-base-{event_type}", ASSET, seconds=1, sequence=370),
+        bids=(BookLevel(fp("99"), fp("5")),),
+        asks=(BookLevel(fp("100"), fp("5")),),
+    )
+    assert model.match(initial, ()) == ()
+    broker = DeterministicBroker()
+    passive = order(
+        broker,
+        f"new-overlay-passive-{event_type}",
+        side=Side.BUY,
+        quantity="1",
+        price="99",
+        created_seconds=2,
+    )
+    if event_type == "snapshot":
+        event = BookSnapshotEvent(
+            **event_fields("new-overlay-snapshot", ASSET, seconds=3, sequence=371),
+            bids=(BookLevel(fp("99"), fp("2")),),
+            asks=(BookLevel(fp("100"), fp("5")),),
+        )
+        expected = Decimal(2)
+    else:
+        event = BookDeltaEvent(
+            **event_fields("new-overlay-delta", ASSET, seconds=3, sequence=371),
+            side=BookSide.BID,
+            action=BookAction.UPSERT,
+            price=fp("99"),
+            quantity=fp("3"),
+            previous_sequence=370,
+        )
+        expected = Decimal(3)
+    assert model.match(event, [passive]) == ()
+    assert model._queue_ahead[passive.order_id] == expected
