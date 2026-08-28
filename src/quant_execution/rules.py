@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -31,10 +31,12 @@ from quant_execution.contracts import (
     LiquidityRole,
     Order,
     OrderIntent,
+    RiskCheckContext,
     RiskDecision,
     Side,
 )
 from quant_execution.ledger import ExactAccountLedger
+from quant_execution.protocols import PortfolioRiskPolicy
 
 _ACCEPTED_DECISION = RiskDecision(True, "ACCEPTED")
 
@@ -302,10 +304,19 @@ class RuleBookRiskGate:
         instruments: Mapping[str, InstrumentSpec],
         ledger: ExactAccountLedger,
         money_scale: int = 8,
+        policies: Sequence[PortfolioRiskPolicy] = (),
     ) -> None:
         self.instruments = dict(instruments)
         self.ledger = ledger
         self.money_scale = money_scale
+        self.policies = tuple(policies)
+        for policy in self.policies:
+            if not callable(getattr(policy, "check_order", None)) or not callable(
+                getattr(policy, "runtime_check", None)
+            ):
+                raise ValidationError("risk policy must implement check_order and runtime_check")
+            if getattr(policy, "sends_live_orders", False):
+                raise ValidationError("risk policy cannot send live orders")
         self.reset()
 
     def reset(self) -> None:
@@ -450,9 +461,12 @@ class RuleBookRiskGate:
             )
             if not decision.accepted:
                 return decision
-            return self._check_reservations(order_intent, account_snapshot, state, spec)
+            decision = self._check_reservations(order_intent, account_snapshot, state, spec)
+            if not decision.accepted:
+                return decision
         except ValidationError as exc:
             return RiskDecision(False, "RULE_CONFIGURATION", str(exc))
+        return self._check_order_policies(order_intent, event_time=as_of)
 
     def reserve(self, intent: OrderIntent) -> None:
         spec = self.instruments[intent.instrument_id]
@@ -514,7 +528,7 @@ class RuleBookRiskGate:
                 "LIQUIDATION_REQUIRED",
                 "NAV is at or below aggregate maintenance margin",
             )
-        return _ACCEPTED_DECISION
+        return self._check_runtime_policies(event_time=snapshot.event_time)
 
     def runtime_check_current(self, event_time: datetime) -> RiskDecision:
         if self.ledger.liquidation_required(event_time):
@@ -523,6 +537,96 @@ class RuleBookRiskGate:
                 "LIQUIDATION_REQUIRED",
                 "NAV is at or below aggregate maintenance margin",
             )
+        return self._check_runtime_policies(event_time=event_time)
+
+    def _risk_context(
+        self,
+        *,
+        event_time: datetime,
+        order_intent: OrderIntent | None = None,
+    ) -> RiskCheckContext:
+        snapshot = self.ledger.snapshot(event_time)
+        portfolio = self.ledger.portfolio_risk_snapshot(event_time)
+        if order_intent is None:
+            return RiskCheckContext(
+                account_snapshot=snapshot,
+                portfolio_snapshot=portfolio,
+            )
+        spec = self.instruments[order_intent.instrument_id]
+        state = self._states[order_intent.instrument_id]
+        reference = state.reference_price
+        if reference is None:
+            raise ValidationError("risk policy requires a causal reference price")
+        local_notional = (
+            decimal(order_intent.quantity) * decimal(reference) * decimal(spec.contract_multiplier)
+        )
+        if order_intent.side is Side.SELL:
+            local_notional = -local_notional
+        projected = self.ledger.convert_to_base(
+            local_notional,
+            spec.settlement_currency,
+            event_time=event_time,
+        )
+        return RiskCheckContext(
+            account_snapshot=snapshot,
+            portfolio_snapshot=portfolio,
+            instrument_spec=spec,
+            reference_price=reference,
+            projected_notional_base=fixed(projected, self.money_scale),
+        )
+
+    def _check_order_policies(
+        self, order_intent: OrderIntent, *, event_time: datetime
+    ) -> RiskDecision:
+        if not self.policies:
+            return _ACCEPTED_DECISION
+        try:
+            context = self._risk_context(event_time=event_time, order_intent=order_intent)
+        except Exception as exc:  # noqa: BLE001 - risk context must fail closed
+            return RiskDecision(False, "RISK_CONTEXT_INVALID", str(exc))
+        for policy in self.policies:
+            try:
+                decision = policy.check_order(order_intent, context)
+            except Exception as exc:  # noqa: BLE001 - third-party policy boundary
+                return RiskDecision(
+                    False,
+                    "RISK_POLICY_ERROR",
+                    f"{type(policy).__name__}: {exc}",
+                )
+            if not isinstance(decision, RiskDecision):
+                return RiskDecision(
+                    False,
+                    "RISK_POLICY_INVALID",
+                    f"{type(policy).__name__} returned a non-RiskDecision",
+                )
+            if not decision.accepted:
+                return decision
+        return _ACCEPTED_DECISION
+
+    def _check_runtime_policies(self, *, event_time: datetime) -> RiskDecision:
+        if not self.policies:
+            return _ACCEPTED_DECISION
+        try:
+            context = self._risk_context(event_time=event_time)
+        except Exception as exc:  # noqa: BLE001 - risk context must fail closed
+            return RiskDecision(False, "RISK_CONTEXT_INVALID", str(exc))
+        for policy in self.policies:
+            try:
+                decision = policy.runtime_check(context)
+            except Exception as exc:  # noqa: BLE001 - third-party policy boundary
+                return RiskDecision(
+                    False,
+                    "RISK_POLICY_ERROR",
+                    f"{type(policy).__name__}: {exc}",
+                )
+            if not isinstance(decision, RiskDecision):
+                return RiskDecision(
+                    False,
+                    "RISK_POLICY_INVALID",
+                    f"{type(policy).__name__} returned a non-RiskDecision",
+                )
+            if not decision.accepted:
+                return decision
         return _ACCEPTED_DECISION
 
     def check_fill(
