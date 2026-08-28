@@ -5,7 +5,7 @@ PureSaber quantitative research, backtesting, and paper trading.
 
 This project never sends live orders.
 
-## v0.3.0 simulation runtime
+## v0.4.0 simulation runtime and portfolio-risk context
 
 The frozen M1 contracts remain compatible and are now backed by:
 
@@ -28,6 +28,10 @@ The frozen M1 contracts remain compatible and are now backed by:
 - replay-time opening entries dated at the first causally available market event,
   with explicit derivative `StatusEvent(status="daily_settlement")` conversion into
   auditable `Settlement` facts exposed by `RunArtifacts.settlements`.
+- immutable `PositionRiskSnapshot`, `PortfolioRiskSnapshot` and `RiskCheckContext`
+  views derived from the exact ledger using causally available marks and FX;
+- ordered, fail-closed `PortfolioRiskPolicy` composition inside `RuleBookRiskGate`,
+  including projected base-currency order notional and deterministic runtime checks.
 
 This package is strictly for research, backtesting and paper trading. It has no
 broker credentials, network order adapter or live-order transmission path. L2 queue
@@ -37,6 +41,9 @@ queue claim.
 Key assumptions live in `InstrumentSpec.metadata`, including lot/minimum sizes,
 commission or maker/taker rates, price bands, margin rates and close-today fees.
 Unknown or incomplete rule configuration is rejected rather than guessed.
+Risk policies are read-only plugins: built-in asset/cash/position/margin checks run
+first, policies cannot transmit orders, and missing mark/FX context or policy errors
+produce explicit rejection codes instead of bypassing risk.
 
 ## Deterministic replay
 

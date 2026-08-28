@@ -11,7 +11,13 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TypeAlias
 
-from quant_data_kit import CorporateActionEvent, FixedPoint, ensure_utc_datetime
+from quant_data_kit import (
+    AssetClass,
+    CorporateActionEvent,
+    FixedPoint,
+    InstrumentSpec,
+    ensure_utc_datetime,
+)
 from quant_data_kit.exceptions import ValidationError
 
 
@@ -483,6 +489,133 @@ class AccountSnapshot:
                 field_name,
                 _immutable_fixed_point_map(getattr(self, field_name), field_name),
             )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PositionRiskSnapshot:
+    instrument_id: str
+    asset_class: AssetClass
+    venue: str
+    settlement_currency: str
+    quantity: FixedPoint
+    mark_price: FixedPoint
+    base_notional: FixedPoint
+    initial_margin: FixedPoint
+    maintenance_margin: FixedPoint
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "instrument_id", _required_text(self.instrument_id, "instrument_id")
+        )
+        if not isinstance(self.asset_class, AssetClass):
+            raise ValidationError("asset_class must be an AssetClass")
+        object.__setattr__(self, "venue", _required_text(self.venue, "venue"))
+        object.__setattr__(
+            self,
+            "settlement_currency",
+            _currency(self.settlement_currency, "settlement_currency"),
+        )
+        for field_name in (
+            "quantity",
+            "mark_price",
+            "base_notional",
+            "initial_margin",
+            "maintenance_margin",
+        ):
+            if not isinstance(getattr(self, field_name), FixedPoint):
+                raise ValidationError(f"{field_name} must be a FixedPoint")
+        if self.mark_price.units <= 0:
+            raise ValidationError("mark_price must be positive")
+        if self.initial_margin.units < 0 or self.maintenance_margin.units < 0:
+            raise ValidationError("position margin must be non-negative")
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PortfolioRiskSnapshot:
+    account_id: str
+    event_time: datetime
+    base_currency: str
+    nav: FixedPoint
+    cash_value: FixedPoint
+    gross_exposure: FixedPoint
+    net_exposure: FixedPoint
+    initial_margin: FixedPoint
+    maintenance_margin: FixedPoint
+    positions: tuple[PositionRiskSnapshot, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "account_id", _required_text(self.account_id, "account_id"))
+        object.__setattr__(
+            self, "event_time", ensure_utc_datetime(self.event_time, field="event_time")
+        )
+        object.__setattr__(self, "base_currency", _currency(self.base_currency, "base_currency"))
+        for field_name in (
+            "nav",
+            "cash_value",
+            "gross_exposure",
+            "net_exposure",
+            "initial_margin",
+            "maintenance_margin",
+        ):
+            if not isinstance(getattr(self, field_name), FixedPoint):
+                raise ValidationError(f"{field_name} must be a FixedPoint")
+        if self.gross_exposure.units < 0:
+            raise ValidationError("gross_exposure must be non-negative")
+        if self.initial_margin.units < 0 or self.maintenance_margin.units < 0:
+            raise ValidationError("portfolio margin must be non-negative")
+        if not isinstance(self.positions, tuple) or any(
+            not isinstance(position, PositionRiskSnapshot) for position in self.positions
+        ):
+            raise ValidationError("positions must be an immutable PositionRiskSnapshot tuple")
+        instrument_ids = tuple(position.instrument_id for position in self.positions)
+        if instrument_ids != tuple(sorted(instrument_ids)) or len(instrument_ids) != len(
+            set(instrument_ids)
+        ):
+            raise ValidationError("positions must be unique and sorted by instrument_id")
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RiskCheckContext:
+    account_snapshot: AccountSnapshot
+    portfolio_snapshot: PortfolioRiskSnapshot
+    instrument_spec: InstrumentSpec | None = None
+    reference_price: FixedPoint | None = None
+    projected_notional_base: FixedPoint | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.account_snapshot, AccountSnapshot):
+            raise ValidationError("account_snapshot must be an AccountSnapshot")
+        if not isinstance(self.portfolio_snapshot, PortfolioRiskSnapshot):
+            raise ValidationError("portfolio_snapshot must be a PortfolioRiskSnapshot")
+        account = self.account_snapshot
+        portfolio = self.portfolio_snapshot
+        if (
+            account.account_id != portfolio.account_id
+            or account.event_time != portfolio.event_time
+            or account.base_currency != portfolio.base_currency
+        ):
+            raise ValidationError("risk context snapshots must describe the same account and time")
+        order_fields = (
+            self.instrument_spec,
+            self.reference_price,
+            self.projected_notional_base,
+        )
+        if any(value is None for value in order_fields) and any(
+            value is not None for value in order_fields
+        ):
+            raise ValidationError("order risk context fields must be all present or all absent")
+        if self.instrument_spec is not None and not isinstance(
+            self.instrument_spec, InstrumentSpec
+        ):
+            raise ValidationError("instrument_spec must be an InstrumentSpec")
+        if self.reference_price is not None and (
+            not isinstance(self.reference_price, FixedPoint) or self.reference_price.units <= 0
+        ):
+            raise ValidationError("reference_price must be a positive FixedPoint")
+        if self.projected_notional_base is not None and not isinstance(
+            self.projected_notional_base, FixedPoint
+        ):
+            raise ValidationError("projected_notional_base must be a FixedPoint")
 
 
 @dataclass(frozen=True, slots=True)

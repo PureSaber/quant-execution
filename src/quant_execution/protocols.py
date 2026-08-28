@@ -16,6 +16,7 @@ from quant_execution.contracts import (
     Order,
     OrderEvent,
     OrderIntent,
+    RiskCheckContext,
     RiskDecision,
     RunResult,
 )
@@ -50,6 +51,14 @@ class RiskGate(Protocol):
     def check(
         self, order_intent: OrderIntent, account_snapshot: AccountSnapshot
     ) -> RiskDecision: ...
+
+
+class PortfolioRiskPolicy(Protocol):
+    sends_live_orders: bool
+
+    def check_order(self, order_intent: OrderIntent, context: RiskCheckContext) -> RiskDecision: ...
+
+    def runtime_check(self, context: RiskCheckContext) -> RiskDecision: ...
 
 
 class MatchingModel(Protocol):
