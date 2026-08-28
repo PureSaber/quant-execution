@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
-
 from quant_data_kit.exceptions import ValidationError
+
 from quant_execution.schemas import (
     FEE_SCHEMA_ID,
     FILL_SCHEMA_ID,

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable, Protocol, Sequence
+from typing import Any, Protocol
 
 from quant_data_kit import MarketEvent
 

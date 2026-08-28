@@ -9,7 +9,6 @@ from typing import Any
 
 import pyarrow as pa
 from jsonschema import Draft202012Validator, FormatChecker
-
 from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
 

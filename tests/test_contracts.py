@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-
 from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
+
 from quant_execution import (
     AccountSnapshot,
     Fee,
@@ -75,7 +75,7 @@ def test_order_intent_requires_explicit_prices_and_utc() -> None:
             quantity=fp("1"),
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.IOC,
-            created_at=datetime(2026, 1, 2),
+            created_at=T0.replace(tzinfo=None),
         )
 
 
