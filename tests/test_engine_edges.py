@@ -660,9 +660,133 @@ class CaptureCountingLedger(ExactAccountLedger):
         return super().capture_state()
 
 
+class CaptureCountingL2Matcher(L2MatchingModel):
+    def __init__(self, instruments):
+        super().__init__(instruments)
+        self.capture_calls = 0
+
+    def capture_state(self):
+        self.capture_calls += 1
+        return super().capture_state()
+
+
+class FillWithoutOpenOrderMatcher:
+    def __init__(self):
+        self.capture_calls = 0
+        self.match_calls = 0
+        self.restore_calls = 0
+        self.state: tuple[str, ...] = ()
+
+    def reset(self):
+        self.state = ()
+
+    def capture_state(self):
+        self.capture_calls += 1
+        return self.state
+
+    def restore_state(self, state):
+        self.restore_calls += 1
+        self.state = state
+
+    def match(self, event, open_orders):
+        self.match_calls += 1
+        assert open_orders == ()
+        self.state += (event.event_id,)
+        return (
+            Fill(
+                fill_id="fill-without-open-order",
+                order_id="missing-order",
+                account_id="account",
+                strategy_id="strategy",
+                instrument_id=STOCK,
+                side=Side.BUY,
+                quantity=fp("100"),
+                price=fp("10"),
+                event_time=event.available_at,
+                liquidity_role=LiquidityRole.TAKER,
+            ),
+        )
+
+
+class CaptureTrackingBatchMatcher(TransactionalBatchMatcher):
+    def __init__(self, prices_by_index):
+        super().__init__(prices_by_index)
+        self.capture_calls = 0
+        self.restore_calls = 0
+
+    def capture_state(self):
+        self.capture_calls += 1
+        return super().capture_state()
+
+    def restore_state(self, state):
+        self.restore_calls += 1
+        super().restore_state(state)
+
+
 class NoFeeGate(RuleBookRiskGate):
     def fee_for(self, fill, order):
         del fill, order
+
+
+def test_no_open_orders_deliver_l2_event_without_matcher_checkpoint() -> None:
+    registry = {SPOT: specs()[SPOT]}
+    matcher = CaptureCountingL2Matcher(registry)
+    engine = transactional_engine(
+        run_id="no-open-orders-l2",
+        strategy=FixtureStrategy({}),
+        matcher=matcher,
+    )
+    snapshot = BookSnapshotEvent(
+        **event_fields("no-open-orders-book", SPOT, seconds=60, sequence=1),
+        bids=(BookLevel(fp("99"), fp("1.000", 3)),),
+        asks=(BookLevel(fp("100"), fp("1.000", 3)),),
+    )
+
+    result = engine.replay((snapshot,), 5)
+
+    assert result.fill_count == 0
+    assert matcher.capture_calls == 1  # Whole-run fail-closed checkpoint only.
+    assert matcher._books[SPOT]["sequence"] == 1
+    assert matcher._liquidity_books[SPOT]["asks"] == {fp("100").units: fp("1.000", 3)}
+
+
+def test_fill_without_open_orders_fails_closed_without_matcher_checkpoint() -> None:
+    matcher = FillWithoutOpenOrderMatcher()
+    engine = manual_engine(FixtureStrategy({}), matcher)
+
+    with pytest.raises(ReplayError, match="not open"):
+        engine.replay((bar("illegal-fill", STOCK, 60, "10"),), 5)
+
+    assert matcher.capture_calls == 1
+    assert matcher.match_calls == 1
+    assert matcher.restore_calls == 1
+    assert matcher.state == ()
+    assert engine.broker.orders == ()
+    assert len(engine.ledger.transactions) == 1
+
+
+def test_open_order_fill_rejection_captures_and_restores_matcher() -> None:
+    matcher = CaptureTrackingBatchMatcher({0: ("200",)})
+    engine = transactional_engine(
+        run_id="capture-on-fill-rejection",
+        strategy=FixtureStrategy({"signal": [spot_signal()]}),
+        matcher=matcher,
+        cash="150",
+    )
+
+    result = engine.replay(
+        [
+            bar("signal", SPOT, 60, "100", volume="10.000"),
+            bar("match", SPOT, 120, "100", volume="10.000"),
+        ],
+        5,
+    )
+
+    assert result.fill_count == 0
+    assert matcher.capture_calls == 2  # Whole-run checkpoint plus the ordered match attempt.
+    assert matcher.restore_calls == 1
+    assert matcher.match_attempts == 0
+    assert engine.broker.orders[0].status is OrderStatus.EXPIRED
 
 
 @pytest.mark.parametrize("with_fill", [False, True])

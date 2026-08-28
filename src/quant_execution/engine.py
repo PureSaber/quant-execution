@@ -298,8 +298,16 @@ class DeterministicRunEngine:
         """Match one event until every remaining candidate can commit atomically."""
 
         while True:
-            matching_checkpoint = self._capture_component(self.matching_model)
             open_orders = self.broker.open_orders
+            if not open_orders:
+                matched = tuple(self.matching_model.match(event, open_orders))
+                if matched:
+                    raise ValidationError(
+                        "matching model returned a fill for an order that is not open"
+                    )
+                return False
+
+            matching_checkpoint = self._capture_component(self.matching_model)
             matched = tuple(self.matching_model.match(event, open_orders))
             if not matched:
                 return False
