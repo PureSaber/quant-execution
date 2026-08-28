@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-execution"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic execution, matching, risk and ledger for PureSaber quant research"
 readme = "README.md"
 license = {text = "MIT"}
@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pyarrow>=14.0",
     "jsonschema>=4.20",
-    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.5.0",
+    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.6.0",
 ]
 
 [project.optional-dependencies]
