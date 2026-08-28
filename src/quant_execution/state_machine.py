@@ -8,31 +8,14 @@ from datetime import datetime
 from quant_data_kit import FixedPoint, ensure_utc_datetime
 from quant_data_kit.exceptions import ValidationError
 
-from quant_execution.contracts import Order, OrderEvent, OrderStatus
+from quant_execution.contracts import (
+    ORDER_STATUS_TRANSITIONS,
+    Order,
+    OrderEvent,
+    OrderStatus,
+)
 
-ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
-    OrderStatus.CREATED: frozenset({OrderStatus.ACCEPTED, OrderStatus.REJECTED}),
-    OrderStatus.ACCEPTED: frozenset(
-        {
-            OrderStatus.PARTIALLY_FILLED,
-            OrderStatus.FILLED,
-            OrderStatus.CANCELLED,
-            OrderStatus.EXPIRED,
-        }
-    ),
-    OrderStatus.PARTIALLY_FILLED: frozenset(
-        {
-            OrderStatus.PARTIALLY_FILLED,
-            OrderStatus.FILLED,
-            OrderStatus.CANCELLED,
-            OrderStatus.EXPIRED,
-        }
-    ),
-    OrderStatus.FILLED: frozenset(),
-    OrderStatus.CANCELLED: frozenset(),
-    OrderStatus.REJECTED: frozenset(),
-    OrderStatus.EXPIRED: frozenset(),
-}
+ALLOWED_TRANSITIONS = ORDER_STATUS_TRANSITIONS
 
 
 def transition_order(
