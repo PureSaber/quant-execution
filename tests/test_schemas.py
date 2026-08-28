@@ -103,7 +103,7 @@ def test_settlement_schema_versions_preserve_v1_and_dual_read_arrow() -> None:
         validate_json_record(SETTLEMENT_SCHEMA_ID, latest, LEGACY_SCHEMA_VERSION)
 
     legacy_arrow = dict(legacy)
-    legacy_arrow["event_time"] = datetime.fromisoformat(legacy["event_time"])
+    legacy_arrow["event_time"] = datetime.fromisoformat(legacy["event_time"].replace("Z", "+00:00"))
     legacy_table = pa.Table.from_pylist(
         [legacy_arrow], schema=get_arrow_schema(SETTLEMENT_SCHEMA_ID, LEGACY_SCHEMA_VERSION)
     )
@@ -112,7 +112,7 @@ def test_settlement_schema_versions_preserve_v1_and_dual_read_arrow() -> None:
         validate_arrow_table(SETTLEMENT_SCHEMA_ID, legacy_table, SCHEMA_VERSION)
 
     latest_arrow = dict(latest)
-    latest_arrow["event_time"] = datetime.fromisoformat(latest["event_time"])
+    latest_arrow["event_time"] = datetime.fromisoformat(latest["event_time"].replace("Z", "+00:00"))
     latest_table = pa.Table.from_pylist(
         [latest_arrow], schema=get_arrow_schema(SETTLEMENT_SCHEMA_ID, SCHEMA_VERSION)
     )
