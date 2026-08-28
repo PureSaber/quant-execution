@@ -218,6 +218,7 @@ class OrderEvent:
     sequence: int
     from_status: OrderStatus
     to_status: OrderStatus
+    fill_quantity: FixedPoint | None = None
     reason: str = ""
 
     def __post_init__(self) -> None:
@@ -238,6 +239,14 @@ class OrderEvent:
             raise ValidationError(
                 f"Illegal order transition: {self.from_status.value}->{self.to_status.value}"
             )
+        is_fill = self.to_status in {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+        }
+        if is_fill != (self.fill_quantity is not None):
+            raise ValidationError("fill_quantity is required exactly for fill order events")
+        if self.fill_quantity is not None:
+            _positive(self.fill_quantity, "fill_quantity")
         if self.to_status in {
             OrderStatus.CANCELLED,
             OrderStatus.REJECTED,

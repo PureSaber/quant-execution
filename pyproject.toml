@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pyarrow>=14.0",
     "jsonschema>=4.20",
-    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.4.0",
+    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@e4e5ddbf477ad6ee07a2aa55ea49c21eebb3ba75",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +23,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "../quant-data-kit/src"]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100

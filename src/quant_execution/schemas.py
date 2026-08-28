@@ -67,6 +67,7 @@ _POSTING = pa.struct(
         pa.field("quantity_delta", _FIXED_POINT, nullable=True),
     ]
 )
+_POSTING_LIST = pa.list_(pa.field("item", _POSTING, nullable=False))
 
 _ARROW_SCHEMAS: dict[str, pa.Schema] = {
     ORDER_INTENT_SCHEMA_ID: pa.schema(list(_ORDER_INTENT)),
@@ -87,6 +88,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             pa.field("sequence", pa.int64(), nullable=False),
             pa.field("from_status", pa.string(), nullable=False),
             pa.field("to_status", pa.string(), nullable=False),
+            pa.field("fill_quantity", _FIXED_POINT, nullable=True),
             pa.field("reason", pa.string(), nullable=False),
         ]
     ),
@@ -144,7 +146,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             pa.field("event_time", _UTC, nullable=False),
             pa.field("event_type", pa.string(), nullable=False),
             pa.field("reference_id", pa.string(), nullable=False),
-            pa.field("postings", pa.list_(_POSTING), nullable=False),
+            pa.field("postings", _POSTING_LIST, nullable=False),
         ]
     ),
 }
@@ -265,6 +267,7 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "sequence": {"type": "integer", "minimum": 1},
             "from_status": {"enum": _ORDER_STATUSES},
             "to_status": {"enum": _ORDER_STATUSES},
+            "fill_quantity": _NULLABLE_FIXED_POINT_JSON,
             "reason": {"type": "string"},
         },
         list(_ARROW_SCHEMAS[ORDER_EVENT_SCHEMA_ID].names),
@@ -368,7 +371,33 @@ _JSON_SCHEMAS[ORDER_EVENT_SCHEMA_ID]["allOf"] = [
                 }
             },
         ]
-    }
+    },
+    {
+        "oneOf": [
+            {
+                "properties": {
+                    "to_status": {"enum": ["partially_filled", "filled"]},
+                    "fill_quantity": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["units", "scale"],
+                        "properties": {
+                            "units": {"type": "integer", "minimum": 1},
+                            "scale": {"type": "integer", "minimum": 0, "maximum": 18},
+                        },
+                    },
+                }
+            },
+            {
+                "properties": {
+                    "to_status": {
+                        "enum": ["accepted", "cancelled", "rejected", "expired"]
+                    },
+                    "fill_quantity": {"type": "null"},
+                }
+            },
+        ]
+    },
 ]
 
 
@@ -426,6 +455,7 @@ def execution_payload(value: object) -> dict[str, Any]:
             "sequence": value.sequence,
             "from_status": value.from_status.value,
             "to_status": value.to_status.value,
+            "fill_quantity": _fixed(value.fill_quantity),
             "reason": value.reason,
         }
     if isinstance(value, Fill):

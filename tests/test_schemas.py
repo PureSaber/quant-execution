@@ -58,6 +58,9 @@ def test_arrow_contract_rejects_nullable_or_wrong_physical_fields() -> None:
     with pytest.raises(ValidationError, match="Arrow schema mismatch"):
         validate_arrow_table(FILL_SCHEMA_ID, wrong)
 
+    postings = get_arrow_schema(LEDGER_TRANSACTION_SCHEMA_ID).field("postings")
+    assert postings.type.value_field.nullable is False
+
 
 def test_unknown_schema_version_fails_closed() -> None:
     with pytest.raises(ValidationError, match="Unsupported"):
@@ -72,6 +75,14 @@ def test_json_contract_rejects_illegal_transition_and_unbalanced_ledger() -> Non
     illegal_event["to_status"] = "filled"
     with pytest.raises(ValidationError, match="JSON schema validation failed"):
         validate_json_record(ORDER_EVENT_SCHEMA_ID, illegal_event)
+
+    fill_event = dict(records[ORDER_EVENT_SCHEMA_ID])
+    fill_event["from_status"] = "accepted"
+    fill_event["to_status"] = "partially_filled"
+    with pytest.raises(ValidationError, match="JSON schema validation failed"):
+        validate_json_record(ORDER_EVENT_SCHEMA_ID, fill_event)
+    fill_event["fill_quantity"] = {"units": 25, "scale": 2}
+    validate_json_record(ORDER_EVENT_SCHEMA_ID, fill_event)
 
     unbalanced = json.loads(json.dumps(records[LEDGER_TRANSACTION_SCHEMA_ID]))
     unbalanced["postings"][1]["amount"]["units"] = 9999
