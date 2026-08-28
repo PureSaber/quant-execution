@@ -14,6 +14,7 @@ from quant_data_kit import (
     BookSnapshotEvent,
     FundingRateEvent,
     MarketEvent,
+    StatusEvent,
     TradeEvent,
 )
 from quant_data_kit.exceptions import ValidationError
@@ -254,6 +255,44 @@ def test_three_cross_asset_golden_replays() -> None:
         engine, events = factory()
         actual[name] = result_payload(engine, events)
     assert actual == expected
+
+
+def test_engine_uses_run_start_for_opening_and_emits_daily_futures_settlement() -> None:
+    registry = {FUTURE: specs()[FUTURE]}
+    strategy = FixtureStrategy({"settle-signal": [Signal(FUTURE, Side.BUY, fp("1"), fp("4000"))]})
+    engine = engine_for(
+        run_id="daily-futures-settlement",
+        registry=registry,
+        initial_cash={"CNY": fp("1000000")},
+        base_currency="CNY",
+        strategy=strategy,
+    )
+    events = [
+        bar("settle-signal", FUTURE, 60, "4000"),
+        bar("settle-fill", FUTURE, 120, "4000"),
+        bar("settle-mark", FUTURE, 180, "4010"),
+        StatusEvent(
+            **event_fields("settle-close", FUTURE, seconds=240),
+            status="daily_settlement",
+            reason="fixture trading-day close",
+        ),
+    ]
+
+    engine.replay(events, 19)
+
+    assert engine.artifacts is not None
+    assert len(engine.artifacts.settlements) == 1
+    settlement = engine.artifacts.settlements[0]
+    assert settlement.settlement_type == "daily_mark"
+    assert settlement.event_time == events[-1].available_at
+    assert settlement.amount.to_decimal() == 3000
+    assert (
+        min(item.event_time for item in engine.artifacts.ledger_transactions)
+        == events[0].available_at
+    )
+    assert any(
+        item.event_type.value == "settlement" for item in engine.artifacts.ledger_transactions
+    )
 
 
 def test_engine_fail_closed_on_strategy_error_duplicate_event_and_future_intent() -> None:

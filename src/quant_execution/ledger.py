@@ -21,6 +21,7 @@ from quant_data_kit import (
     MarketEvent,
     MarkPriceEvent,
     QuoteEvent,
+    StatusEvent,
     TradeEvent,
     ensure_utc_datetime,
 )
@@ -87,6 +88,7 @@ class ExactAccountLedger:
         initial_cash: Mapping[str, FixedPoint] | None = None,
         fx_to_base: Mapping[str, FixedPoint] | None = None,
         money_scale: int = 8,
+        opened_at: datetime | None = None,
     ) -> None:
         if not account_id.strip() or not base_currency.strip():
             raise ValidationError("account_id and base_currency are required")
@@ -103,9 +105,19 @@ class ExactAccountLedger:
         self.money_scale = money_scale
         self._initial_cash = dict(initial_cash or {})
         self._initial_fx = dict(fx_to_base or {})
+        self._default_opened_at = (
+            ensure_utc_datetime(opened_at, field="opened_at")
+            if opened_at is not None
+            else _OPENED_AT
+        )
         self.reset()
 
-    def reset(self) -> None:
+    def reset(self, *, opened_at: datetime | None = None) -> None:
+        opening_time = (
+            ensure_utc_datetime(opened_at, field="opened_at")
+            if opened_at is not None
+            else self._default_opened_at
+        )
         self._transactions: list[LedgerTransaction] = []
         self._transaction_keys: set[str] = set()
         self._event_fingerprints: dict[str, LedgerEvent] = {}
@@ -121,21 +133,21 @@ class ExactAccountLedger:
             tuple[str, str, Decimal, str | None, Decimal | None, int], Posting
         ] = {}
         self._fx: dict[str, tuple[Decimal, datetime]] = {
-            self.base_currency: (Decimal(1), _OPENED_AT)
+            self.base_currency: (Decimal(1), opening_time)
         }
         self._fx_history: list[tuple[str, Decimal, datetime]] = [
-            (self.base_currency, Decimal(1), _OPENED_AT)
+            (self.base_currency, Decimal(1), opening_time)
         ]
-        self._event_time = _OPENED_AT
+        self._event_time = opening_time
         for currency in sorted(self._initial_fx):
-            self.set_fx_rate(currency, self._initial_fx[currency], event_time=_OPENED_AT)
+            self.set_fx_rate(currency, self._initial_fx[currency], event_time=opening_time)
         for currency, amount in sorted(self._initial_cash.items()):
             value = decimal(amount)
             transaction = self._make_transaction(
                 event_type=LedgerEventType.FX_CONVERSION,
                 reference_id=f"opening:{currency}",
                 idempotency_key=f"opening:{self.account_id}:{currency}",
-                event_time=_OPENED_AT,
+                event_time=opening_time,
                 postings=(
                     self._posting("assets:cash", currency, value),
                     self._posting("equity:opening", currency, -value),
@@ -646,6 +658,33 @@ class ExactAccountLedger:
             amount=fixed(amount, self.money_scale),
             currency=spec.settlement_currency,
             event_time=event.available_at,
+        )
+
+    def settlement_from_market(self, event: StatusEvent) -> Settlement | None:
+        """Translate an explicit daily-settlement status into an exact ledger event."""
+        if event.status.lower() != "daily_settlement":
+            return None
+        spec = self._spec(event.instrument_id)
+        if not self._is_derivative(spec):
+            raise ValidationError("daily_settlement status requires a derivative instrument")
+        quantity = self._positions.get(event.instrument_id, Decimal(0))
+        if quantity == 0:
+            return None
+        settlement_price = self._mark_price(event.instrument_id)
+        amount = (
+            (settlement_price - self._average_cost(event.instrument_id))
+            * quantity
+            * decimal(spec.contract_multiplier)
+        )
+        return Settlement(
+            settlement_id=_identifier("settlement", event.event_id, self.account_id),
+            account_id=self.account_id,
+            instrument_id=event.instrument_id,
+            amount=fixed(amount, self.money_scale),
+            currency=spec.settlement_currency,
+            event_time=event.available_at,
+            settlement_type="daily_mark",
+            settlement_price=fixed(settlement_price, spec.price_tick.scale),
         )
 
     def snapshot(self, event_time: datetime | None = None) -> AccountSnapshot:

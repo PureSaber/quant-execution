@@ -67,7 +67,7 @@ from quant_execution.schemas import (
 )
 from quant_execution.state_machine import ALLOWED_TRANSITIONS, transition_order
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ACCOUNT_SNAPSHOT_SCHEMA_ID",
