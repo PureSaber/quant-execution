@@ -359,6 +359,7 @@ class Settlement:
     currency: str
     event_time: datetime
     settlement_type: str
+    settlement_price: FixedPoint | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -372,6 +373,8 @@ class Settlement:
             )
         if not isinstance(self.amount, FixedPoint):
             raise ValidationError("amount must be a FixedPoint")
+        if self.settlement_price is not None:
+            _positive(self.settlement_price, "settlement_price")
         object.__setattr__(self, "currency", _currency(self.currency))
         object.__setattr__(
             self, "event_time", ensure_utc_datetime(self.event_time, field="event_time")

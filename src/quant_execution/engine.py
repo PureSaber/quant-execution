@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +31,7 @@ from quant_execution.contracts import (
     Order,
     OrderEvent,
     OrderIntent,
+    OrderStatus,
     RunResult,
     TimeInForce,
 )
@@ -129,37 +131,84 @@ class DeterministicRunEngine:
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise ValidationError("seed must be a non-negative integer")
         events = self._validated_events(event_stream)
-        self._reset()
-        context = StrategyContext(
-            run_id=self.run_id,
-            account_id=self.account_id,
-            strategy_id=self.strategy_id,
-            seed=seed,
-            state={},
-        )
-        fills: list[Fill] = []
-        fees: list[Fee] = []
-        risk_events: list[str] = []
-        seen_fill_ids: set[str] = set()
+        checkpoint = self._capture_state()
+        event: MarketEvent | None = None
         try:
+            self._reset()
+            context = StrategyContext(
+                run_id=self.run_id,
+                account_id=self.account_id,
+                strategy_id=self.strategy_id,
+                seed=seed,
+                state={},
+            )
+            fills: list[Fill] = []
+            fees: list[Fee] = []
+            risk_events: list[str] = []
+            seen_fill_ids: set[str] = set()
             for event in events:
                 day_expiries = self.broker.expire_day_orders(event.trading_day, event.available_at)
                 for expiry in day_expiries:
                     self.risk_gate.release_order(self._order(expiry.order_id))
                 self.risk_gate.observe(event)
-                account_snapshot = self.ledger.observe_market(event, create_snapshot=False)
+                account_snapshot = self.ledger.observe_market(
+                    event,
+                    create_snapshot=False,
+                    trusted_unique=True,
+                )
                 if isinstance(event, CorporateActionEvent):
-                    account_snapshot = self.ledger.apply(event)
+                    account_snapshot = self.ledger.apply(event, create_snapshot=False)
                 elif isinstance(event, FundingRateEvent):
                     funding = self.ledger.funding_from_market(event)
                     if funding is not None:
-                        account_snapshot = self.ledger.apply(funding)
+                        account_snapshot = self.ledger.apply(funding, create_snapshot=False)
+
+                if self.broker.open_orders:
+                    for order in self.broker.open_orders:
+                        if (
+                            type(self.risk_gate).check_open_order
+                            is RuleBookRiskGate.check_open_order
+                        ):
+                            decision = self.risk_gate.check_open_order_current(
+                                order, event_time=event.available_at
+                            )
+                        else:
+                            account_snapshot = account_snapshot or self.ledger.snapshot(
+                                event.available_at
+                            )
+                            decision = self.risk_gate.check_open_order(
+                                order,
+                                account_snapshot,
+                                event_time=event.available_at,
+                            )
+                        if not decision.accepted:
+                            self.broker.expire(
+                                order.order_id,
+                                event_time=event.available_at,
+                                reason=f"{decision.code}: {decision.message}",
+                            )
+                            self.risk_gate.release_order(order)
+                            risk_events.append(
+                                f"{order.order_id}:{decision.code}:{decision.message}"
+                            )
 
                 matched = tuple(self.matching_model.match(event, self.broker.open_orders))
                 for fill in matched:
                     if fill.fill_id in seen_fill_ids:
                         raise ValidationError(f"duplicate fill_id: {fill.fill_id}")
                     order = self._order(fill.order_id)
+                    fill_decision = self.risk_gate.check_fill(fill, order)
+                    if not fill_decision.accepted:
+                        self.broker.expire(
+                            order.order_id,
+                            event_time=event.available_at,
+                            reason=f"{fill_decision.code}: {fill_decision.message}",
+                        )
+                        self.risk_gate.release_order(order)
+                        risk_events.append(
+                            f"{order.order_id}:{fill_decision.code}:{fill_decision.message}"
+                        )
+                        continue
                     self.broker.apply_fill(fill)
                     self.risk_gate.release_fill(fill, order)
                     account_snapshot = self.ledger.apply_with_trading_day(
@@ -169,14 +218,18 @@ class DeterministicRunEngine:
                     )
                     fee = self.risk_gate.fee_for(fill, order)
                     if fee is not None:
-                        account_snapshot = self.ledger.apply(fee)
+                        self.ledger.apply(fee, create_snapshot=False)
                         fees.append(fee)
+                    account_snapshot = None
                     seen_fill_ids.add(fill.fill_id)
                     fills.append(fill)
 
                 self._expire_immediate_orders(event)
-                account_snapshot = account_snapshot or self.ledger.snapshot(event.available_at)
-                runtime = self.risk_gate.runtime_check(account_snapshot)
+                if type(self.risk_gate).runtime_check is RuleBookRiskGate.runtime_check:
+                    runtime = self.risk_gate.runtime_check_current(event.available_at)
+                else:
+                    account_snapshot = account_snapshot or self.ledger.snapshot(event.available_at)
+                    runtime = self.risk_gate.runtime_check(account_snapshot)
                 if not runtime.accepted:
                     risk_events.append(f"{event.event_id}:{runtime.code}:{runtime.message}")
                     for order in self.broker.open_orders:
@@ -188,46 +241,61 @@ class DeterministicRunEngine:
                         self.risk_gate.release_order(order)
 
                 intents = self._strategy_intents(context, event)
-                if intents and account_snapshot is None:
-                    account_snapshot = self.ledger.snapshot(event.available_at)
                 for intent in intents:
-                    decision = self.risk_gate.check(intent, account_snapshot)
+                    if type(self.risk_gate).check is RuleBookRiskGate.check:
+                        decision = self.risk_gate.check_current(
+                            intent, event_time=event.available_at
+                        )
+                    else:
+                        account_snapshot = account_snapshot or self.ledger.snapshot(
+                            event.available_at
+                        )
+                        decision = self.risk_gate.check(intent, account_snapshot)
                     if decision.accepted:
                         order = self.broker.submit(intent)
                         self.broker.note_trading_day(order.order_id, event.trading_day)
-                        self.risk_gate.reserve(intent)
+                        if order.status in {
+                            OrderStatus.ACCEPTED,
+                            OrderStatus.PARTIALLY_FILLED,
+                        }:
+                            self.risk_gate.reserve(intent)
                     else:
                         self.broker.reject(intent, code=decision.code, message=decision.message)
                         risk_events.append(
                             f"{intent.idempotency_key}:{decision.code}:{decision.message}"
                         )
         except Exception as exc:
-            event_id = event.event_id if "event" in locals() else "before-first-event"
+            self._restore_state(checkpoint)
+            event_id = event.event_id if event is not None else "before-first-event"
             raise ReplayError(f"replay failed closed at {event_id}: {exc}") from exc
 
-        order_payloads = [execution_payload(item) for item in self.broker.order_events]
-        fill_payloads = [execution_payload(item) for item in fills]
-        result = RunResult(
-            run_id=self.run_id,
-            seed=seed,
-            event_count=len(events),
-            order_count=len(self.broker.orders),
-            fill_count=len(fills),
-            event_sha256=_hash(order_payloads),
-            fill_sha256=_hash(fill_payloads),
-            ledger_sha256=self.ledger.journal_sha256,
-        )
-        self.artifacts = RunArtifacts(
-            market_events=events,
-            orders=self.broker.orders,
-            order_events=self.broker.order_events,
-            fills=tuple(fills),
-            fees=tuple(fees),
-            ledger_transactions=self.ledger.transactions,
-            risk_events=tuple(risk_events),
-            result=result,
-        )
-        return result
+        try:
+            order_payloads = [execution_payload(item) for item in self.broker.order_events]
+            fill_payloads = [execution_payload(item) for item in fills]
+            result = RunResult(
+                run_id=self.run_id,
+                seed=seed,
+                event_count=len(events),
+                order_count=len(self.broker.orders),
+                fill_count=len(fills),
+                event_sha256=_hash(order_payloads),
+                fill_sha256=_hash(fill_payloads),
+                ledger_sha256=self.ledger.journal_sha256,
+            )
+            self.artifacts = RunArtifacts(
+                market_events=events,
+                orders=self.broker.orders,
+                order_events=self.broker.order_events,
+                fills=tuple(fills),
+                fees=tuple(fees),
+                ledger_transactions=self.ledger.transactions,
+                risk_events=tuple(risk_events),
+                result=result,
+            )
+            return result
+        except Exception as exc:
+            self._restore_state(checkpoint)
+            raise ReplayError(f"replay failed closed during finalization: {exc}") from exc
 
     def _reset(self) -> None:
         self.broker.reset()
@@ -240,6 +308,56 @@ class DeterministicRunEngine:
         if callable(strategy_reset):
             strategy_reset()
         self.artifacts = None
+
+    @staticmethod
+    def _capture_component(component: object) -> tuple[str, object]:
+        try:
+            capture = getattr(component, "capture_state", None)
+            if callable(capture):
+                return "explicit", capture()
+            state = getattr(component, "__dict__", None)
+            if state is None:
+                raise ValidationError(
+                    f"component {type(component).__name__} cannot provide atomic replay state"
+                )
+            return "dict", deepcopy(state)
+        except ValidationError:
+            raise
+        except Exception as exc:
+            raise ValidationError(
+                f"component {type(component).__name__} state cannot be checkpointed"
+            ) from exc
+
+    @staticmethod
+    def _restore_component(component: object, checkpoint: tuple[str, object]) -> None:
+        mode, state = checkpoint
+        if mode == "explicit":
+            restore = getattr(component, "restore_state", None)
+            if not callable(restore):
+                raise ValidationError(f"component {type(component).__name__} lost restore_state")
+            restore(state)
+            return
+        component_state = component.__dict__
+        component_state.clear()
+        component_state.update(deepcopy(state))
+
+    def _capture_state(self) -> dict[str, object]:
+        return {
+            "broker": self._capture_component(self.broker),
+            "ledger": self._capture_component(self.ledger),
+            "risk_gate": self._capture_component(self.risk_gate),
+            "matching_model": self._capture_component(self.matching_model),
+            "strategy": self._capture_component(self.strategy),
+            "artifacts": deepcopy(self.artifacts),
+        }
+
+    def _restore_state(self, checkpoint: dict[str, object]) -> None:
+        self._restore_component(self.broker, checkpoint["broker"])
+        self._restore_component(self.ledger, checkpoint["ledger"])
+        self._restore_component(self.risk_gate, checkpoint["risk_gate"])
+        self._restore_component(self.matching_model, checkpoint["matching_model"])
+        self._restore_component(self.strategy, checkpoint["strategy"])
+        self.artifacts = checkpoint["artifacts"]
 
     @staticmethod
     def _validated_events(event_stream: Iterable[MarketEvent]) -> tuple[MarketEvent, ...]:
@@ -265,8 +383,10 @@ class DeterministicRunEngine:
         for intent in intents:
             if intent.account_id != self.account_id or intent.strategy_id != self.strategy_id:
                 raise ValidationError("strategy intent identity differs from engine context")
-            if intent.created_at > event.available_at:
-                raise ValidationError("strategy emitted an order from the future")
+            if intent.created_at != event.available_at:
+                raise ValidationError(
+                    "strategy callback intent created_at must equal MarketEvent.available_at"
+                )
         return tuple(sorted(intents, key=lambda item: item.idempotency_key))
 
     def _expire_immediate_orders(self, event: MarketEvent) -> None:

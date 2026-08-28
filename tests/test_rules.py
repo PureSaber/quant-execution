@@ -220,21 +220,20 @@ def test_futures_margin_reduce_only_night_day_and_close_today_fee() -> None:
     assert gate.check(reduce, ledger.snapshot()).accepted
     broker = DeterministicBroker()
     reduce_order = broker.submit(reduce)
-    fee = gate.fee_for(
-        Fill(
-            fill_id="future-close",
-            order_id=reduce_order.order_id,
-            account_id="account",
-            strategy_id="strategy",
-            instrument_id=FUTURE,
-            side=Side.SELL,
-            quantity=fp("1"),
-            price=fp("4000"),
-            event_time=T0,
-            liquidity_role=LiquidityRole.TAKER,
-        ),
-        reduce_order,
+    closing_fill = Fill(
+        fill_id="future-close",
+        order_id=reduce_order.order_id,
+        account_id="account",
+        strategy_id="strategy",
+        instrument_id=FUTURE,
+        side=Side.SELL,
+        quantity=fp("1"),
+        price=fp("4000"),
+        event_time=T0,
+        liquidity_role=LiquidityRole.TAKER,
     )
+    ledger.apply_with_trading_day(closing_fill, trading_day=night_day)
+    fee = gate.fee_for(closing_fill, reduce_order)
     assert fee is not None and fee.amount.to_decimal() == Decimal(240)
 
 

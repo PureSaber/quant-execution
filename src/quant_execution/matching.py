@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import timedelta
 from decimal import ROUND_DOWN, Decimal
 
@@ -64,6 +65,13 @@ def _quantity_from_available(order: Order, available: Decimal) -> FixedPoint:
     return fixed(amount, order.intent.quantity.scale, rounding=ROUND_DOWN)
 
 
+def _exact_units(value: FixedPoint, scale: int, *, field: str) -> int:
+    scaled = decimal(value).scaleb(scale)
+    if scaled != scaled.to_integral_value():
+        raise ValidationError(f"{field} cannot be represented at L2 book price scale {scale}")
+    return int(scaled)
+
+
 class _BaseMatchingModel:
     sends_live_orders = False
 
@@ -80,6 +88,17 @@ class _BaseMatchingModel:
 
     def reset(self) -> None:
         pass
+
+    def capture_state(self) -> dict[str, object]:
+        return deepcopy(
+            {name: value for name, value in self.__dict__.items() if name.startswith("_")}
+        )
+
+    def restore_state(self, state: dict[str, object]) -> None:
+        for name in tuple(self.__dict__):
+            if name.startswith("_"):
+                del self.__dict__[name]
+        self.__dict__.update(deepcopy(state))
 
     def eligible(self, order: Order, event: MarketEvent) -> bool:
         return (
@@ -343,7 +362,7 @@ class L2MatchingModel(_BaseMatchingModel):
     def reset(self) -> None:
         self._books: dict[str, dict[str, dict[int, FixedPoint] | int]] = {}
         self._queue_ahead: dict[str, Decimal] = {}
-        self._queue_keys: dict[str, tuple[Side, int]] = {}
+        self._queue_keys: dict[str, tuple[Side, int, int]] = {}
         self._triggered_stops: set[str] = set()
 
     def match(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> Sequence[Fill]:
@@ -367,6 +386,9 @@ class L2MatchingModel(_BaseMatchingModel):
         return ()
 
     def _apply_snapshot(self, event: BookSnapshotEvent) -> None:
+        price_scales = {level.price.scale for level in (*event.bids, *event.asks)}
+        if len(price_scales) != 1:
+            raise ValidationError("L2 snapshot price levels must use one price scale")
         self._books[event.instrument_id] = {
             "bids": {level.price.units: level.quantity for level in event.bids},
             "asks": {level.price.units: level.quantity for level in event.asks},
@@ -383,6 +405,8 @@ class L2MatchingModel(_BaseMatchingModel):
             raise ValidationError("L2 matching requires a BookSnapshot before deltas") from exc
         if int(book["sequence"]) != event.previous_sequence:
             raise ValidationError("L2 matching sequence gap")
+        if event.price.scale != int(book["price_scale"]):
+            raise ValidationError("L2 delta price scale differs from snapshot price scale")
         side_name = "bids" if event.side is BookSide.BID else "asks"
         side = book[side_name]
         assert isinstance(side, dict)
@@ -400,7 +424,11 @@ class L2MatchingModel(_BaseMatchingModel):
         if decrease:
             expected_side = Side.BUY if event.side is BookSide.BID else Side.SELL
             for order_id in tuple(self._queue_ahead):
-                if self._queue_keys.get(order_id) != (expected_side, event.price.units):
+                if self._queue_keys.get(order_id) != (
+                    expected_side,
+                    event.price.units,
+                    event.price.scale,
+                ):
                     continue
                 self._queue_ahead[order_id] = max(
                     Decimal(0), self._queue_ahead[order_id] - decrease
@@ -415,7 +443,7 @@ class L2MatchingModel(_BaseMatchingModel):
         asks = dict(book["asks"])
         scale = int(book["price_scale"])
         fills: list[Fill] = []
-        prior_at_price: dict[tuple[Side, int], Decimal] = {}
+        prior_at_price: dict[tuple[Side, int, int], Decimal] = {}
         for order in _price_time_orders(orders):
             if not self.eligible(order, event):
                 continue
@@ -462,10 +490,14 @@ class L2MatchingModel(_BaseMatchingModel):
                 OrderType.LIMIT,
                 OrderType.STOP_LIMIT,
             }:
-                price_units = order.intent.limit_price.units
+                price_units = _exact_units(
+                    order.intent.limit_price,
+                    scale,
+                    field="resting order limit_price",
+                )
                 same = bids if order.intent.side is Side.BUY else asks
                 market_ahead = decimal(same[price_units]) if price_units in same else Decimal(0)
-                key = (order.intent.side, price_units)
+                key = (order.intent.side, price_units, scale)
                 self._queue_ahead.setdefault(
                     order.order_id, market_ahead + prior_at_price.get(key, Decimal(0))
                 )
@@ -491,6 +523,9 @@ class L2MatchingModel(_BaseMatchingModel):
         return price <= limit if intent.side is Side.BUY else price >= limit
 
     def _consume_queues(self, trade: TradeEvent, orders: Sequence[Order]) -> tuple[Fill, ...]:
+        book = self._books.get(trade.instrument_id)
+        if book is not None and trade.price.scale != int(book["price_scale"]):
+            raise ValidationError("L2 trade price scale differs from snapshot price scale")
         available = decimal(trade.quantity)
         fills: list[Fill] = []
         for order in _price_time_orders(orders):
@@ -502,11 +537,12 @@ class L2MatchingModel(_BaseMatchingModel):
                 continue
             if order.intent.side is Side.SELL and trade.aggressor_side is not AggressorSide.BUY:
                 continue
-            limit = decimal(order.intent.limit_price)
-            trade_price = decimal(trade.price)
-            if order.intent.side is Side.BUY and trade_price > limit:
-                continue
-            if order.intent.side is Side.SELL and trade_price < limit:
+            queue_side, queue_units, queue_scale = self._queue_keys[order.order_id]
+            if (
+                queue_side is not order.intent.side
+                or trade.price.scale != queue_scale
+                or trade.price.units != queue_units
+            ):
                 continue
             ahead = self._queue_ahead[order.order_id]
             consumed_ahead = min(ahead, available)
@@ -527,7 +563,7 @@ class L2MatchingModel(_BaseMatchingModel):
                     trade,
                     order,
                     quantity,
-                    order.intent.limit_price,
+                    trade.price,
                     LiquidityRole.MAKER,
                     len(fills),
                 )
