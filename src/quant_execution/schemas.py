@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
@@ -13,6 +14,7 @@ from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution.contracts import (
+    AccountSnapshot,
     Fee,
     Fill,
     Funding,
@@ -21,6 +23,7 @@ from quant_execution.contracts import (
     OrderEvent,
     OrderIntent,
     Posting,
+    RunResult,
     Settlement,
 )
 
@@ -34,6 +37,8 @@ FEE_SCHEMA_ID = "puresaber.execution.fee"
 FUNDING_SCHEMA_ID = "puresaber.execution.funding"
 SETTLEMENT_SCHEMA_ID = "puresaber.execution.settlement"
 LEDGER_TRANSACTION_SCHEMA_ID = "puresaber.execution.ledger-transaction"
+ACCOUNT_SNAPSHOT_SCHEMA_ID = "puresaber.execution.account-snapshot"
+RUN_RESULT_SCHEMA_ID = "puresaber.execution.run-result"
 
 _UTC = pa.timestamp("ns", tz="UTC")
 _FIXED_POINT = pa.struct(
@@ -68,6 +73,10 @@ _POSTING = pa.struct(
     ]
 )
 _POSTING_LIST = pa.list_(pa.field("item", _POSTING, nullable=False))
+_FIXED_POINT_MAP = pa.map_(
+    pa.field("key", pa.string(), nullable=False),
+    pa.field("value", _FIXED_POINT, nullable=False),
+)
 
 _ARROW_SCHEMAS: dict[str, pa.Schema] = {
     ORDER_INTENT_SCHEMA_ID: pa.schema(list(_ORDER_INTENT)),
@@ -149,6 +158,35 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             pa.field("postings", _POSTING_LIST, nullable=False),
         ]
     ),
+    ACCOUNT_SNAPSHOT_SCHEMA_ID: pa.schema(
+        [
+            pa.field("account_id", pa.string(), nullable=False),
+            pa.field("event_time", _UTC, nullable=False),
+            pa.field("base_currency", pa.string(), nullable=False),
+            pa.field("cash_balances", _FIXED_POINT_MAP, nullable=False),
+            pa.field("positions", _FIXED_POINT_MAP, nullable=False),
+            pa.field("nav", _FIXED_POINT, nullable=False),
+            pa.field("cost_basis", _FIXED_POINT_MAP, nullable=False),
+            pa.field("realized_pnl", _FIXED_POINT_MAP, nullable=False),
+            pa.field("unrealized_pnl", _FIXED_POINT_MAP, nullable=False),
+            pa.field("initial_margin", _FIXED_POINT, nullable=False),
+            pa.field("maintenance_margin", _FIXED_POINT, nullable=False),
+            pa.field("liquidation_required", pa.bool_(), nullable=False),
+        ]
+    ),
+    RUN_RESULT_SCHEMA_ID: pa.schema(
+        [
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("seed", pa.int64(), nullable=False),
+            pa.field("event_count", pa.int64(), nullable=False),
+            pa.field("order_count", pa.int64(), nullable=False),
+            pa.field("fill_count", pa.int64(), nullable=False),
+            pa.field("order_sha256", pa.string(), nullable=False),
+            pa.field("fill_sha256", pa.string(), nullable=False),
+            pa.field("ledger_sha256", pa.string(), nullable=False),
+            pa.field("result_sha256", pa.string(), nullable=False),
+        ]
+    ),
 }
 
 _FIXED_POINT_JSON = {
@@ -164,6 +202,11 @@ _NULLABLE_FIXED_POINT_JSON = {"oneOf": [_FIXED_POINT_JSON, {"type": "null"}]}
 _UTC_JSON = {"type": "string", "format": "date-time", "pattern": "Z$"}
 _TEXT = {"type": "string", "minLength": 1}
 _CURRENCY = {"type": "string", "pattern": "^[A-Z0-9]{3,12}$"}
+_SHA256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+_FIXED_POINT_MAP_JSON = {
+    "type": "object",
+    "additionalProperties": _FIXED_POINT_JSON,
+}
 
 
 def _object_schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -343,6 +386,37 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         list(_ARROW_SCHEMAS[LEDGER_TRANSACTION_SCHEMA_ID].names),
     ),
+    ACCOUNT_SNAPSHOT_SCHEMA_ID: _object_schema(
+        {
+            "account_id": _TEXT,
+            "event_time": _UTC_JSON,
+            "base_currency": _CURRENCY,
+            "cash_balances": _FIXED_POINT_MAP_JSON,
+            "positions": _FIXED_POINT_MAP_JSON,
+            "nav": _FIXED_POINT_JSON,
+            "cost_basis": _FIXED_POINT_MAP_JSON,
+            "realized_pnl": _FIXED_POINT_MAP_JSON,
+            "unrealized_pnl": _FIXED_POINT_MAP_JSON,
+            "initial_margin": _FIXED_POINT_JSON,
+            "maintenance_margin": _FIXED_POINT_JSON,
+            "liquidation_required": {"type": "boolean"},
+        },
+        list(_ARROW_SCHEMAS[ACCOUNT_SNAPSHOT_SCHEMA_ID].names),
+    ),
+    RUN_RESULT_SCHEMA_ID: _object_schema(
+        {
+            "run_id": _TEXT,
+            "seed": {"type": "integer", "minimum": 0},
+            "event_count": {"type": "integer", "minimum": 0},
+            "order_count": {"type": "integer", "minimum": 0},
+            "fill_count": {"type": "integer", "minimum": 0},
+            "order_sha256": _SHA256,
+            "fill_sha256": _SHA256,
+            "ledger_sha256": _SHA256,
+            "result_sha256": _SHA256,
+        },
+        list(_ARROW_SCHEMAS[RUN_RESULT_SCHEMA_ID].names),
+    ),
 }
 
 _JSON_SCHEMAS[ORDER_EVENT_SCHEMA_ID]["allOf"] = [
@@ -357,17 +431,13 @@ _JSON_SCHEMAS[ORDER_EVENT_SCHEMA_ID]["allOf"] = [
             {
                 "properties": {
                     "from_status": {"const": "accepted"},
-                    "to_status": {
-                        "enum": ["partially_filled", "filled", "cancelled", "expired"]
-                    },
+                    "to_status": {"enum": ["partially_filled", "filled", "cancelled", "expired"]},
                 }
             },
             {
                 "properties": {
                     "from_status": {"const": "partially_filled"},
-                    "to_status": {
-                        "enum": ["partially_filled", "filled", "cancelled", "expired"]
-                    },
+                    "to_status": {"enum": ["partially_filled", "filled", "cancelled", "expired"]},
                 }
             },
         ]
@@ -390,9 +460,7 @@ _JSON_SCHEMAS[ORDER_EVENT_SCHEMA_ID]["allOf"] = [
             },
             {
                 "properties": {
-                    "to_status": {
-                        "enum": ["accepted", "cancelled", "rejected", "expired"]
-                    },
+                    "to_status": {"enum": ["accepted", "cancelled", "rejected", "expired"]},
                     "fill_quantity": {"type": "null"},
                 }
             },
@@ -434,6 +502,10 @@ def _posting_payload(posting: Posting) -> dict[str, Any]:
         "instrument_id": posting.instrument_id,
         "quantity_delta": _fixed(posting.quantity_delta),
     }
+
+
+def _fixed_map(values: Mapping[str, FixedPoint]) -> dict[str, dict[str, int]]:
+    return {key: _fixed(values[key]) for key in sorted(values)}
 
 
 def execution_payload(value: object) -> dict[str, Any]:
@@ -510,6 +582,33 @@ def execution_payload(value: object) -> dict[str, Any]:
             "reference_id": value.reference_id,
             "postings": [_posting_payload(posting) for posting in value.postings],
         }
+    if isinstance(value, AccountSnapshot):
+        return {
+            "account_id": value.account_id,
+            "event_time": _time(value.event_time),
+            "base_currency": value.base_currency,
+            "cash_balances": _fixed_map(value.cash_balances),
+            "positions": _fixed_map(value.positions),
+            "nav": _fixed(value.nav),
+            "cost_basis": _fixed_map(value.cost_basis),
+            "realized_pnl": _fixed_map(value.realized_pnl),
+            "unrealized_pnl": _fixed_map(value.unrealized_pnl),
+            "initial_margin": _fixed(value.initial_margin),
+            "maintenance_margin": _fixed(value.maintenance_margin),
+            "liquidation_required": value.liquidation_required,
+        }
+    if isinstance(value, RunResult):
+        return {
+            "run_id": value.run_id,
+            "seed": value.seed,
+            "event_count": value.event_count,
+            "order_count": value.order_count,
+            "fill_count": value.fill_count,
+            "order_sha256": value.order_sha256,
+            "fill_sha256": value.fill_sha256,
+            "ledger_sha256": value.ledger_sha256,
+            "result_sha256": value.result_sha256,
+        }
     raise TypeError(f"Unsupported execution contract: {type(value).__name__}")
 
 
@@ -553,9 +652,7 @@ def validate_json_record(
             raise ValidationError(f"Ledger JSON record is unbalanced: {unbalanced}")
 
 
-def validate_arrow_table(
-    schema_id: str, table: pa.Table, version: str = SCHEMA_VERSION
-) -> None:
+def validate_arrow_table(schema_id: str, table: pa.Table, version: str = SCHEMA_VERSION) -> None:
     expected = get_arrow_schema(schema_id, version)
     if table.schema != expected:
         raise ValidationError(

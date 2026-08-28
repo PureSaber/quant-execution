@@ -1,5 +1,6 @@
 """Deterministic execution contracts for PureSaber."""
 
+from quant_execution.broker import DeterministicBroker, remaining_quantity
 from quant_execution.contracts import (
     AccountSnapshot,
     Fee,
@@ -21,6 +22,13 @@ from quant_execution.contracts import (
     Side,
     TimeInForce,
 )
+from quant_execution.engine import (
+    DeterministicRunEngine,
+    ReplayError,
+    RunArtifacts,
+)
+from quant_execution.ledger import ExactAccountLedger
+from quant_execution.matching import BarMatchingModel, L2MatchingModel, TradeBBOModel
 from quant_execution.protocols import (
     AccountLedger,
     BrokerSimulator,
@@ -30,7 +38,16 @@ from quant_execution.protocols import (
     Strategy,
     StrategyContext,
 )
+from quant_execution.rules import (
+    AShareRule,
+    CryptoSpotRule,
+    FuturesRule,
+    LinearPerpetualRule,
+    MarketState,
+    RuleBookRiskGate,
+)
 from quant_execution.schemas import (
+    ACCOUNT_SNAPSHOT_SCHEMA_ID,
     FEE_SCHEMA_ID,
     FILL_SCHEMA_ID,
     FUNDING_SCHEMA_ID,
@@ -38,6 +55,7 @@ from quant_execution.schemas import (
     ORDER_EVENT_SCHEMA_ID,
     ORDER_INTENT_SCHEMA_ID,
     ORDER_SCHEMA_ID,
+    RUN_RESULT_SCHEMA_ID,
     SETTLEMENT_SCHEMA_ID,
     execution_payload,
     get_arrow_schema,
@@ -47,9 +65,10 @@ from quant_execution.schemas import (
 )
 from quant_execution.state_machine import ALLOWED_TRANSITIONS, transition_order
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    "ACCOUNT_SNAPSHOT_SCHEMA_ID",
     "ALLOWED_TRANSITIONS",
     "FEE_SCHEMA_ID",
     "FILL_SCHEMA_ID",
@@ -58,17 +77,28 @@ __all__ = [
     "ORDER_EVENT_SCHEMA_ID",
     "ORDER_INTENT_SCHEMA_ID",
     "ORDER_SCHEMA_ID",
+    "RUN_RESULT_SCHEMA_ID",
     "SETTLEMENT_SCHEMA_ID",
+    "AShareRule",
     "AccountLedger",
     "AccountSnapshot",
+    "BarMatchingModel",
     "BrokerSimulator",
+    "CryptoSpotRule",
+    "DeterministicBroker",
+    "DeterministicRunEngine",
+    "ExactAccountLedger",
     "Fee",
     "Fill",
     "Funding",
+    "FuturesRule",
+    "L2MatchingModel",
     "LedgerEvent",
     "LedgerEventType",
     "LedgerTransaction",
+    "LinearPerpetualRule",
     "LiquidityRole",
+    "MarketState",
     "MatchingModel",
     "Order",
     "OrderEvent",
@@ -76,8 +106,11 @@ __all__ = [
     "OrderStatus",
     "OrderType",
     "Posting",
+    "ReplayError",
     "RiskDecision",
     "RiskGate",
+    "RuleBookRiskGate",
+    "RunArtifacts",
     "RunEngine",
     "RunResult",
     "Settlement",
@@ -85,9 +118,11 @@ __all__ = [
     "Strategy",
     "StrategyContext",
     "TimeInForce",
+    "TradeBBOModel",
     "execution_payload",
     "get_arrow_schema",
     "get_json_schema",
+    "remaining_quantity",
     "transition_order",
     "validate_arrow_table",
     "validate_json_record",
