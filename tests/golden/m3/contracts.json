@@ -1,0 +1,27 @@
+{
+  "puresaber.execution.account-snapshot": {
+    "account_id": "account",
+    "event_time": "2026-01-02T01:00:00Z",
+    "base_currency": "USD",
+    "cash_balances": {"USD": {"units": 10000, "scale": 2}},
+    "positions": {"asset": {"units": 200, "scale": 2}},
+    "nav": {"units": 11000, "scale": 2},
+    "cost_basis": {"asset": {"units": 500, "scale": 2}},
+    "realized_pnl": {"asset": {"units": 100, "scale": 2}},
+    "unrealized_pnl": {"asset": {"units": 1000, "scale": 2}},
+    "initial_margin": {"units": 400, "scale": 2},
+    "maintenance_margin": {"units": 200, "scale": 2},
+    "liquidation_required": false
+  },
+  "puresaber.execution.run-result": {
+    "run_id": "run",
+    "seed": 7,
+    "event_count": 3,
+    "order_count": 2,
+    "fill_count": 1,
+    "order_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "fill_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "ledger_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "result_sha256": "05dc04e739820cd3856db369ff9598e1f445e393387905d005965f34a86ba003"
+  }
+}

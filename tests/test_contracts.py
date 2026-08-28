@@ -16,10 +16,13 @@ from quant_execution import (
     LedgerTransaction,
     LiquidityRole,
     Order,
+    OrderEvent,
     OrderIntent,
     OrderStatus,
     OrderType,
     Posting,
+    RiskDecision,
+    RunResult,
     Settlement,
     Side,
     TimeInForce,
@@ -230,3 +233,206 @@ def test_fill_fee_funding_settlement_and_snapshot_are_typed() -> None:
     assert settlement.amount.units > 0
     with pytest.raises(TypeError):
         snapshot.cash_balances["USD"] = fp("1")
+
+
+def test_contract_validation_branches_fail_closed() -> None:
+    valid_intent = limit_intent()
+    intent_values = {
+        "side": "buy",
+        "order_type": "limit",
+        "time_in_force": "gtc",
+        "reduce_only": 1,
+        "quantity": fp("0"),
+    }
+    for field_name, value in intent_values.items():
+        with pytest.raises(ValidationError):
+            OrderIntent(
+                idempotency_key="bad-intent",
+                account_id="account",
+                strategy_id="strategy",
+                instrument_id="asset",
+                side=value if field_name == "side" else Side.BUY,
+                quantity=value if field_name == "quantity" else fp("1"),
+                order_type=value if field_name == "order_type" else OrderType.LIMIT,
+                time_in_force=value if field_name == "time_in_force" else TimeInForce.GTC,
+                created_at=T0,
+                limit_price=fp("1"),
+                reduce_only=value if field_name == "reduce_only" else False,
+            )
+    with pytest.raises(ValidationError, match="stop_price requirement"):
+        OrderIntent(
+            idempotency_key="missing-stop",
+            account_id="account",
+            strategy_id="strategy",
+            instrument_id="asset",
+            side=Side.BUY,
+            quantity=fp("1"),
+            order_type=OrderType.STOP,
+            time_in_force=TimeInForce.GTC,
+            created_at=T0,
+        )
+
+    order_cases = (
+        {"intent": object()},
+        {"status": "accepted"},
+        {"version": True},
+        {"filled_quantity": fp("1", 3)},
+        {"filled_quantity": fp("11")},
+        {"status": OrderStatus.FILLED, "filled_quantity": fp("1"), "version": 2},
+        {"status": OrderStatus.PARTIALLY_FILLED, "filled_quantity": fp("0"), "version": 2},
+        {"status": OrderStatus.CREATED, "version": 1},
+        {"status": OrderStatus.ACCEPTED, "version": 0},
+    )
+    for changes in order_cases:
+        with pytest.raises(ValidationError):
+            Order(**({"order_id": "bad-order", "intent": valid_intent} | changes))
+
+    event_base = {
+        "event_id": "event",
+        "order_id": "order",
+        "event_time": T0,
+        "sequence": 1,
+        "from_status": OrderStatus.ACCEPTED,
+        "to_status": OrderStatus.CANCELLED,
+        "reason": "fixture",
+    }
+    event_cases = (
+        {"sequence": 0},
+        {"from_status": "accepted"},
+        {"reason": 1},
+        {"from_status": OrderStatus.FILLED},
+        {"to_status": OrderStatus.FILLED, "fill_quantity": None},
+        {"fill_quantity": fp("1")},
+        {"reason": ""},
+    )
+    for changes in event_cases:
+        with pytest.raises(ValidationError):
+            OrderEvent(**(event_base | changes))
+
+    fill_base = {
+        "fill_id": "fill",
+        "order_id": "order",
+        "account_id": "account",
+        "strategy_id": "strategy",
+        "instrument_id": "asset",
+        "side": Side.BUY,
+        "quantity": fp("1"),
+        "price": fp("1"),
+        "event_time": T0,
+    }
+    with pytest.raises(ValidationError, match="side"):
+        Fill(**(fill_base | {"side": "buy"}))
+    with pytest.raises(ValidationError, match="liquidity_role"):
+        Fill(**(fill_base | {"liquidity_role": "maker"}))
+    with pytest.raises(ValidationError, match="venue_trade_id"):
+        Fill(**(fill_base | {"venue_trade_id": " "}))
+
+    with pytest.raises(ValidationError, match="amount"):
+        Fee(
+            fee_id="fee",
+            fill_id="fill",
+            account_id="account",
+            amount="1",
+            currency="USD",
+            event_time=T0,
+            fee_type="fee",
+        )
+    with pytest.raises(ValidationError, match="amount"):
+        Funding(
+            funding_id="funding",
+            account_id="account",
+            instrument_id="asset",
+            amount="1",
+            currency="USD",
+            event_time=T0,
+        )
+    with pytest.raises(ValidationError, match="amount"):
+        Settlement(
+            settlement_id="settlement",
+            account_id="account",
+            instrument_id="asset",
+            amount="1",
+            currency="USD",
+            event_time=T0,
+            settlement_type="daily_mark",
+        )
+    with pytest.raises(ValidationError, match="settlement_price"):
+        Settlement(
+            settlement_id="settlement",
+            account_id="account",
+            instrument_id="asset",
+            amount=fp("1"),
+            currency="USD",
+            event_time=T0,
+            settlement_type="daily_mark",
+            settlement_price=fp("0"),
+        )
+
+    with pytest.raises(ValidationError, match="amount"):
+        Posting(ledger_account="assets:cash", currency="USD", amount="1")
+    with pytest.raises(ValidationError, match="instrument_id"):
+        Posting(
+            ledger_account="assets:cash",
+            currency="USD",
+            amount=fp("1"),
+            instrument_id=" ",
+        )
+    with pytest.raises(ValidationError, match="quantity_delta"):
+        Posting(
+            ledger_account="assets:cash",
+            currency="USD",
+            amount=fp("1"),
+            quantity_delta="1",
+        )
+
+    balanced = (
+        Posting(ledger_account="assets:cash", currency="USD", amount=fp("1")),
+        Posting(ledger_account="equity", currency="USD", amount=fp("-1")),
+    )
+    transaction_base = {
+        "transaction_id": "tx",
+        "idempotency_key": "key",
+        "event_time": T0,
+        "event_type": LedgerEventType.FILL,
+        "reference_id": "fill",
+        "postings": balanced,
+    }
+    with pytest.raises(ValidationError, match="event_type"):
+        LedgerTransaction(**(transaction_base | {"event_type": "fill"}))
+    for bad_postings in ([*balanced], (balanced[0], object())):
+        with pytest.raises(ValidationError, match="immutable tuple"):
+            LedgerTransaction(**(transaction_base | {"postings": bad_postings}))
+
+    snapshot_base = {
+        "account_id": "account",
+        "event_time": T0,
+        "base_currency": "USD",
+    }
+    for changes in (
+        {"nav": "1"},
+        {"liquidation_required": 1},
+        {"cash_balances": []},
+        {"cash_balances": {"USD": "1"}},
+        {"cash_balances": {"usd": fp("1")}},
+    ):
+        with pytest.raises(ValidationError):
+            AccountSnapshot(**(snapshot_base | changes))
+
+    with pytest.raises(ValidationError, match="accepted"):
+        RiskDecision(accepted=1, code="ACCEPTED")
+    with pytest.raises(ValidationError, match="message"):
+        RiskDecision(accepted=True, code="ACCEPTED", message=1)
+    result_base = {
+        "run_id": "run",
+        "seed": 1,
+        "event_count": 1,
+        "order_count": 0,
+        "fill_count": 0,
+        "event_sha256": "a" * 64,
+        "fill_sha256": "b" * 64,
+        "ledger_sha256": "c" * 64,
+    }
+    with pytest.raises(ValidationError, match="non-negative"):
+        RunResult(**(result_base | {"seed": True}))
+    with pytest.raises(ValidationError, match="SHA-256"):
+        RunResult(**(result_base | {"event_sha256": "A" * 64}))

@@ -1,0 +1,14 @@
+{
+  "schema_id": "puresaber.execution.settlement",
+  "schema_version": "1.1.0",
+  "record": {
+    "settlement_id": "settlement-1",
+    "account_id": "account-1",
+    "instrument_id": "future:cffex:IF2603",
+    "amount": {"units": 2000, "scale": 2},
+    "currency": "CNY",
+    "event_time": "2026-01-02T07:00:00Z",
+    "settlement_type": "daily_mark",
+    "settlement_price": {"units": 400000, "scale": 2}
+  }
+}

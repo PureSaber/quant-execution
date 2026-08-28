@@ -21,7 +21,7 @@ from quant_execution.contracts import (
 )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class StrategyContext:
     run_id: str
     account_id: str
@@ -31,9 +31,7 @@ class StrategyContext:
 
 
 class Strategy(Protocol):
-    def on_event(
-        self, context: StrategyContext, event: MarketEvent
-    ) -> Sequence[OrderIntent]: ...
+    def on_event(self, context: StrategyContext, event: MarketEvent) -> Sequence[OrderIntent]: ...
 
 
 class BrokerSimulator(Protocol):
@@ -55,9 +53,7 @@ class RiskGate(Protocol):
 
 
 class MatchingModel(Protocol):
-    def match(
-        self, market_event: MarketEvent, open_orders: Sequence[Order]
-    ) -> Sequence[Fill]: ...
+    def match(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> Sequence[Fill]: ...
 
 
 class AccountLedger(Protocol):
