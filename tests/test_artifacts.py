@@ -77,6 +77,8 @@ def test_streamed_replay_is_byte_identical_to_memory_reference(factory, tmp_path
     assert stored is not None
     assert actual == expected
     assert streamed.ledger.snapshot().nav == expected_nav
+    assert streamed.ledger.transaction_count == stored.counts["ledger_transactions"]
+    assert streamed.ledger.journal_sha256 == actual.ledger_sha256
     assert tuple(stored.iter_payload_bytes("orders")) == tuple(
         order_bytes(value) for value in expected_artifacts.orders
     )
@@ -285,6 +287,30 @@ def test_streaming_input_validation_empty_and_sink_failure_branches(tmp_path, mo
     with pytest.raises(RuntimeError, match="artifact writer failed"):
         failing.seal()
     failing.abort()
+
+
+def test_failed_second_streaming_replay_restores_completed_artifact_handle_and_ledger(
+    tmp_path,
+) -> None:
+    engine, events = scenario_a_share()
+    ordered = sorted(events, key=_event_sort_key)
+    first = engine.replay_to_sink(ordered, 42, ArrowReplayArtifactSink(tmp_path / "completed"))
+    completed = engine.stored_artifacts
+    assert completed is not None
+    completed_count = engine.ledger.transaction_count
+    completed_hash = engine.ledger.journal_sha256
+
+    with pytest.raises(ReplayError, match="non-MarketEvent"):
+        engine.replay_to_sink(
+            (ordered[0], object()),
+            42,
+            ArrowReplayArtifactSink(tmp_path / "failed-second"),
+        )
+
+    assert engine.stored_artifacts == completed
+    assert engine.ledger.transaction_count == completed_count
+    assert engine.ledger.journal_sha256 == completed_hash == first.ledger_sha256
+    assert (tmp_path / "failed-second" / "FAILED.json").is_file()
 
 
 def test_sink_defensive_state_and_queue_full_branches(tmp_path, monkeypatch) -> None:
@@ -623,6 +649,8 @@ def test_streaming_ledger_compact_idempotency_and_stream_guards(tmp_path) -> Non
     ledger.start_artifact_stream(sink)
     with pytest.raises(ValidationError, match="already active"):
         ledger.start_artifact_stream(sink)
+    with pytest.raises(ValidationError, match="unavailable until artifact finalization"):
+        _ = ledger.journal_sha256
     fill = Fill(
         fill_id="ledger-stream-fill",
         order_id="external",
@@ -677,8 +705,12 @@ def test_streaming_ledger_compact_idempotency_and_stream_guards(tmp_path) -> Non
             trading_day=T0.date(),
         )
     assert ledger.transaction_count == 2
-    ledger.finish_artifact_stream()
-    ledger.finish_artifact_stream()
+    with pytest.raises(ValidationError, match="lowercase SHA-256"):
+        ledger.finish_artifact_stream(journal_sha256="bad")
+    journal_sha256 = ledger.finish_artifact_stream()
+    assert journal_sha256 == ledger.journal_sha256
+    assert ledger.transaction_count == 2
+    assert ledger.finish_artifact_stream() == journal_sha256
     sink.close({"run_id": "ledger-compact"})
 
 

@@ -17,8 +17,8 @@ python -m pip check
 
 ## v0.5.0 M7 bounded replay artifacts
 
-`DeterministicRunEngine.replay_to_sink` provides a bounded-memory Arrow path for long event
-replays while preserving the public in-memory `replay` reference. A completed artifact directory
+`DeterministicRunEngine.replay_to_sink` provides bounded artifact batching for long event replays
+while preserving the public in-memory `replay` reference. A completed artifact directory
 is immutable: its canonical manifest records logical stream hashes, physical file hashes, byte
 sizes, counts and run-result metadata. `load_stored_artifacts` verifies the manifest, every Arrow
 schema, contiguous sequence, byte size, physical hash and logical hash before exposing any facts.
@@ -167,6 +167,6 @@ independent10-million-event processes—not merely their median—to pass. Artif
 strictly reloaded and hash-verified after each timed run. The exact 50%-fill stress workload and
 the earlier materialized-path profile remain disclosed separately in
 [`docs/performance-m3a.md`](docs/performance-m3a.md).
-The bounded-memory contract, differential matrix, benchmark definition and current gate evidence
+The artifact-retention contract, differential matrix, benchmark definition and current gate evidence
 are documented in
 [`docs/performance-m7-streaming.md`](docs/performance-m7-streaming.md).

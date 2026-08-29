@@ -2,7 +2,7 @@
 
 ## Outcome
 
-The candidate adds a strict bounded-memory Arrow artifact path without replacing the frozen
+The candidate adds an artifact-retention-bounded Arrow path without replacing the frozen
 Python reference path. Correctness, compatibility and coverage gates pass. From clean commit
 `f41edc86dbd92667312998372c536d4882f8ae8f`, all three independent10-million-event processes pass
 the50,000-events/second and16GiB gates; no calibration result is promoted to release evidence.
@@ -84,6 +84,10 @@ logical hashes, physical Arrow hashes and the manifest hash were identical acros
 The three retained artifact directories contain1,501,955,792 bytes each. The machine-readable
 evidence is `validation/performance/m7-execution-final-10m.json`; its SHA-256 is
 `089fd422c92dc66222fe41e6594224d8e12c490dfbe2ffe1ef48290302cd0010`.
+
+The Arrow buffers and writer queue are bounded, but replay identity sets and broker order/index
+state still scale with event or order count. The claim is therefore controlled memory at the
+certified10-million-event envelope (maximum2,240.21MiB), not strict input-independent O(1) memory.
 
 ## Dense-stress limitation
 
