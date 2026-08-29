@@ -5,6 +5,50 @@ PureSaber quantitative research, backtesting, and paper trading.
 
 This project never sends live orders.
 
+## Install
+
+```bash
+python -m venv .venv
+python -m pip install --requirement requirements.lock
+python -m pip check
+python -m pip install --no-deps --no-build-isolation --editable .
+python -m pip check
+```
+
+## v0.4.1 M6 dependency governance
+
+The package declares the `execution` layer through `[tool.quant-workspace]`, publishes the ten
+`puresaber.execution.*` schemas at version `1.1.0`, and identifies `requirements.lock` as its
+externally resolved dependency set. The lock covers runtime dependencies, the `dev` extra, and
+editable-build requirements for Python3.10-3.12. Every registry package is fixed to one exact
+version. The `dev` extra names Python3.10's conditional compatibility dependencies explicitly so
+a lock compiled on Python3.12 remains complete for the whole matrix. The internal package is also
+fixed by its released annotated tag:
+`quant-data-kit@v0.6.1`, from `https://github.com/PureSaber/quant-data-kit.git`, resolving to
+commit `edf1351690dc60691cc6330390adcdbf8bc79c5f`.
+
+Regenerate the lock only after reviewing dependency changes in `pyproject.toml`:
+
+```bash
+python -m pip install "pip-tools==7.6.1"
+pip-compile --extra dev --build-deps-for editable --allow-unsafe --strip-extras \
+  --resolver backtracking --index-url https://pypi.org/simple \
+  --constraint requirements-constraints.txt \
+  --output-file requirements.lock pyproject.toml
+```
+
+Validate a rebuilt lock in clean Python3.10,3.11, and3.12 environments. In each environment,
+install `requirements.lock` first, run `pip check`, then install the repository editable with
+`--no-deps --no-build-isolation` and run `pip check` again. The project declaration and lock are
+one review unit; do not hand-edit an isolated transitive pin or install CI extras outside the lock.
+`requirements-constraints.txt` contains only cross-interpreter resolver limits and is not a second
+installation input.
+
+Rollback is a Git revert of the governance change, restoring `pyproject.toml`,
+`src/quant_execution/__init__.py`, `requirements-constraints.txt`, `requirements.lock`, CI, and
+this documentation together. Existing release tags and historical lock hashes are immutable:
+never move, overwrite, or rebuild an old tag to repair dependency resolution.
+
 ## v0.4.0 simulation runtime and portfolio-risk context
 
 The frozen M1 contracts remain compatible and are now backed by:
@@ -71,9 +115,13 @@ linear perpetual funding. They are regression fixtures, not performance marketin
 ## Verification
 
 ```bash
-python -m ruff check src tests benchmarks
-python -m ruff format --check src tests benchmarks
-python -m pytest --cov=quant_execution --cov-branch --cov-report=term-missing -q
+python -m ruff check src tests benchmarks tools
+python -m ruff format --check src tests benchmarks tools
+python -m pytest --cov=quant_execution --cov-branch --cov-report=term-missing \
+  --cov-report=json:coverage.json -q
+python -m coverage report --fail-under=80
+python tools/check_branch_coverage.py coverage.json --threshold 90 \
+  broker contracts schemas engine matching state_machine ledger rules
 python benchmarks/benchmark_replay.py --workload all --repeat 3 --require-rate 50000
 ```
 
