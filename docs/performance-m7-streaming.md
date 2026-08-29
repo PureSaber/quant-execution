@@ -3,9 +3,9 @@
 ## Outcome
 
 The candidate adds a strict bounded-memory Arrow artifact path without replacing the frozen
-Python reference path. Correctness, compatibility and coverage gates pass. The formal
-10-million-event, three-process M7 result is recorded only after running from a clean committed
-candidate in the locked environment; no calibration result is promoted to release evidence.
+Python reference path. Correctness, compatibility and coverage gates pass. From clean commit
+`f41edc86dbd92667312998372c536d4882f8ae8f`, all three independent10-million-event processes pass
+the50,000-events/second and16GiB gates; no calibration result is promoted to release evidence.
 
 ## Architecture and compatibility
 
@@ -70,6 +70,20 @@ The official run sets `TEMP` and `TMP` to `F:\puresaber-m7-temp` and writes to a
 under `F:\puresaber-m7-artifacts`. Every Arrow stream and canonical manifest is retained; the
 benchmark has no automatic deletion mode. Exact machine, dependency, commit, dirty-state, timing,
 output-volume, strict-verification and per-process fields live in the committed JSON evidence.
+
+## Formal result
+
+| Run | Events/s | Peak working set | Strict reload |
+|---:|---:|---:|---|
+| 1 | 61,879.49 | 2,240.21MiB | PASS |
+| 2 | 63,673.68 | 2,236.92MiB | PASS |
+| 3 | 63,057.50 | 2,237.29MiB | PASS |
+
+Each run processed10,000,000 events,500,000 fills and1,000,001 exact ledger transactions. All
+logical hashes, physical Arrow hashes and the manifest hash were identical across fresh processes.
+The three retained artifact directories contain1,501,955,792 bytes each. The machine-readable
+evidence is `validation/performance/m7-execution-final-10m.json`; its SHA-256 is
+`089fd422c92dc66222fe41e6594224d8e12c490dfbe2ffe1ef48290302cd0010`.
 
 ## Dense-stress limitation
 
