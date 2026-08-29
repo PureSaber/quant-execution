@@ -126,7 +126,9 @@ python benchmarks/benchmark_replay.py --workload all --repeat 3 --require-rate 5
 ```
 
 The 50k-events/second replay objective is an explicit local performance gate. The exact
-50%-fill workload remains below the gate while retaining all 1,000 fills, 2,001 balanced
-transactions, risk checks and byte-identical v0.4.1 final hashes. The reproduced measurements,
-same-window control, profile evidence and required follow-up architecture work are disclosed in
+50%-fill workload remains below the gate while retaining every fill, fee, balanced transaction,
+risk check and byte-identical v0.4.1 golden hash. The largest retained run has500,000 events,
+250,000 fills and500,001 transactions; its median is14,638.05 events/s and its peak working set is
+1,319.62MiB. The reproduced measurements, profile evidence, measured memory slope and required
+follow-up architecture work are disclosed in
 [`docs/performance-m3a.md`](docs/performance-m3a.md).

@@ -9,9 +9,11 @@ Scope:`quant-execution`only. Baseline commit/tag:
 python -m cProfile ... DeterministicRunEngine.replay(events(2000), seed=42)
 ```
 
-- Baseline:1,273,646 primitive calls,0.555s cumulative replay time.
-- Candidate:1,128,655 primitive calls,0.505s cumulative replay time.
-- Full tables:`m7-baseline-profile.txt`,`m7-optimized-profile.txt`.
+- v0.4.1 baseline:1,273,646 primitive calls,0.555s cumulative replay time.
+- First M7 candidate:1,128,655 primitive calls,0.505s.
+- Technical-lead candidate:1,011,749 primitive calls,0.344s.
+- Remaining top cumulative paths:`_match_and_commit`0.151s,`_commit_fill`0.112s,
+  ledger replay application0.085s, transaction translation0.056s and risk checks0.049s.
 
 ## Tests and coverage
 
@@ -26,54 +28,58 @@ python tools/check_branch_coverage.py coverage.json --threshold 90 \
 ```
 
 - Ruff check/format:PASS.
-- Pytest:179 passed.
-- Total coverage:95.08%.
-- Pure branch coverage:broker98.08%,contracts91.77%,schemas92.11%,engine90.32%,
-  matching94.31%,state_machine100.00%,ledger90.00%,rules91.26%.
+- Python3.12 pytest:181 passed.
+- Total coverage:94.98%.
+- Pure branch coverage:broker95.16%,contracts91.88%,schemas92.11%,engine90.15%,
+  matching93.25%,state_machine96.67%,ledger90.48%,rules91.43%.
+- Local Python3.10/3.11 runtimes were unavailable; PR CI is the required matrix evidence.
 
 ## Performance
 
 ```text
-python benchmarks/benchmark_replay.py --workload all --release-events 10000 \
+python benchmarks/benchmark_replay.py --workload all --release-events 100000 \
   --dense-events 2000 --repeat 3 --require-rate 50000 \
-  --output validation/performance/m7-final-all-2000.json
+  --output validation/performance/m7-techlead-final-all-2000.json
 ```
 
-- No-order median:202,688.05 events/s;peak:127.15MiB;rate/memory gates:PASS/PASS.
-- Dense median:11,731.93 events/s;peak:130.24MiB;rate/memory gates:FAIL/PASS.
+- No-order median:240,012.25 events/s;peak:228.40MiB;rate/memory gates:PASS/PASS.
+- Dense median:15,912.92 events/s;peak:120.88MiB;rate/memory gates:FAIL/PASS.
 - Dense facts:2,000 events,1,000 orders/fills,2,000 order events,2,001 transactions.
-
-```text
-python benchmarks/benchmark_replay.py --workload dense --dense-events 2000 \
-  --repeat 3 --require-rate 50000 --output validation/performance/m7-optimized-dense-2000.json
-```
-
-- Earlier median:8,341.27 events/s;peak:130.08MiB.
-- Facts:2,000 events,1,000 orders/fills,2,000 order events,2,001 transactions.
-- Memory gate:PASS.Rate gate:FAIL.
+- All four dense hashes remain byte-identical to the v0.4.1 golden hashes.
 
 ```text
 python benchmarks/benchmark_replay.py --workload dense --dense-events 20000 \
-  --repeat 3 --require-rate 50000 --output validation/performance/m7-optimized-dense-20000.json
+  --repeat 3 --require-rate 50000 \
+  --output validation/performance/m7-techlead-final-dense-20000.json
+python benchmarks/benchmark_replay.py --workload dense --dense-events 100000 \
+  --repeat 3 --require-rate 50000 \
+  --output validation/performance/m7-techlead-final-dense-100000.json
+python benchmarks/benchmark_replay.py --workload dense --dense-events 500000 \
+  --repeat 3 --require-rate 50000 \
+  --output validation/performance/m7-techlead-final-dense-500000.json
 ```
 
-- Median:9,222.43 events/s;peak:243.88MiB.
-- Facts:20,000 events,10,000 orders/fills,20,000 order events,20,001 transactions.
-- Memory gate:PASS.Rate gate:FAIL.
+| Events | Orders/fills | Order events | Transactions | Median | Peak | Rate gate |
+|---:|---:|---:|---:|---:|---:|---|
+| 20,000 | 10,000 | 20,000 | 20,001 | 15,869.53/s | 165.54MiB | FAIL |
+| 100,000 | 50,000 | 100,000 | 100,001 | 15,536.93/s | 360.31MiB | FAIL |
+| 500,000 | 250,000 | 500,000 | 500,001 | 14,638.05/s | 1,319.62MiB | FAIL |
 
-The same-window v0.4.1/candidate controls measured6,807.35/10,672.48 events/s. All four
-2,000-event hashes are byte-identical. The candidate is therefore semantically equivalent and
-measurably faster in the controlled comparison, but it does not satisfy the release rate gate.
+Every row used three fresh processes. Within each row, event, fill, ledger and result hashes were
+identical across all three runs. The500,000-event run retained the original50% fill density and
+all matching, fee and exact double-entry facts.
 
-## Remote handoff
+The observed100,000-to500,000 incremental working-set slope is2.46KiB/event, implying about
+23.5GiB at10million dense events before safety margin. Because throughput was already only29.28%
+of target and the measured memory projection exceeded16GiB, a10million run was not started.
 
-- Implementation commit:`70df9c1aee5d49c6a1b966304b863808e3b61183`.
+## Outcome and next architecture
+
+The candidate is measurably faster and lower-memory than the starting PR candidate, but the M7
+release gate remains honestly`FAIL`. The next implementation must introduce a bounded-memory
+typed artifact sink and a compiled fixed-point matching/accounting kernel, both guarded by
+byte-identical Python-oracle differential tests. Deferring artifact construction outside replay,
+dropping transactions or changing event density is prohibited.
+
 - PR:[#6](https://github.com/PureSaber/quant-execution/pull/6).
-- Push CI:[run33230566607](https://github.com/PureSaber/quant-execution/actions/runs/33230566607),
-  Python3.10/3.11/3.12 all PASS.
-- PR CI:[run33230576404](https://github.com/PureSaber/quant-execution/actions/runs/33230576404),
-  Python3.10/3.11/3.12 all PASS.
-- CI installs`requirements.lock`, runs`pip check`, then installs the editable project with
-  `--no-deps --no-build-isolation` and runs`pip check`again.
-- Package version remains0.4.1, the lock and dependency declaration are unchanged, and no new tag
-  was created because the50k/s rate gate failed.
+- Package version remains0.4.1; no merge, tag or release is authorized while the gate fails.

@@ -128,19 +128,27 @@ class _BaseMatchingModel:
         role: LiquidityRole,
         index: int,
     ) -> Fill:
-        return Fill(
-            fill_id=_fill_id(model, event.event_id, order.order_id, index, price),
-            order_id=order.order_id,
-            account_id=order.intent.account_id,
-            strategy_id=order.intent.strategy_id,
-            instrument_id=order.intent.instrument_id,
-            side=order.intent.side,
-            quantity=quantity,
-            price=price,
-            event_time=event.available_at,
-            liquidity_role=role,
-            venue_trade_id=getattr(event, "event_id", None),
+        if not isinstance(quantity, FixedPoint) or quantity.units <= 0:
+            raise ValidationError("fill quantity must be a positive FixedPoint")
+        if not isinstance(price, FixedPoint) or price.units <= 0:
+            raise ValidationError("fill price must be a positive FixedPoint")
+        if not isinstance(role, LiquidityRole):
+            raise ValidationError("fill liquidity_role must be a LiquidityRole")
+        fill = object.__new__(Fill)
+        object.__setattr__(
+            fill, "fill_id", _fill_id(model, event.event_id, order.order_id, index, price)
         )
+        object.__setattr__(fill, "order_id", order.order_id)
+        object.__setattr__(fill, "account_id", order.intent.account_id)
+        object.__setattr__(fill, "strategy_id", order.intent.strategy_id)
+        object.__setattr__(fill, "instrument_id", order.intent.instrument_id)
+        object.__setattr__(fill, "side", order.intent.side)
+        object.__setattr__(fill, "quantity", quantity)
+        object.__setattr__(fill, "price", price)
+        object.__setattr__(fill, "event_time", event.available_at)
+        object.__setattr__(fill, "liquidity_role", role)
+        object.__setattr__(fill, "venue_trade_id", event.event_id)
+        return fill
 
 
 class BarMatchingModel(_BaseMatchingModel):

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import datetime
+
+from quant_data_kit import FixedPoint
 
 
 def flat_sequence_bytes(values: Sequence[object]) -> bytes:
@@ -35,3 +38,20 @@ def string_token(value: str) -> str:
     """Return the exact ensure_ascii JSON token for one validated string."""
 
     return json.encoder.encode_basestring_ascii(value)
+
+
+def fixed_token(value: FixedPoint | None) -> str:
+    """Encode a fixed-point value like sorted canonical execution JSON."""
+
+    if value is None:
+        return "null"
+    return f'{{"scale":{value.scale},"units":{value.units}}}'
+
+
+def utc_token(value: datetime, *, zulu: bool = True) -> str:
+    """Encode one already validated UTC timestamp as a JSON string token."""
+
+    rendered = value.isoformat()
+    if zulu:
+        rendered = rendered.replace("+00:00", "Z")
+    return string_token(rendered)

@@ -24,6 +24,7 @@ from quant_data_kit import (
 )
 from quant_data_kit.exceptions import ValidationError
 
+from quant_execution._json import fixed_token, string_token, utc_token
 from quant_execution.broker import DeterministicBroker
 from quant_execution.contracts import (
     Fee,
@@ -35,7 +36,6 @@ from quant_execution.contracts import (
     OrderStatus,
     RunResult,
     Settlement,
-    TimeInForce,
 )
 from quant_execution.ledger import ExactAccountLedger
 from quant_execution.matching import BarMatchingModel
@@ -86,6 +86,58 @@ def _canonical(value: Any) -> bytes:
 
 def _hash(records: Sequence[object]) -> str:
     return hashlib.sha256(_canonical(records)).hexdigest()
+
+
+def _order_event_bytes(event: OrderEvent) -> bytes:
+    return (
+        "{"
+        f'"event_id":{string_token(event.event_id)},'
+        f'"event_time":{utc_token(event.event_time)},'
+        f'"fill_quantity":{fixed_token(event.fill_quantity)},'
+        f'"from_status":{string_token(event.from_status.value)},'
+        f'"order_id":{string_token(event.order_id)},'
+        f'"reason":{string_token(event.reason)},'
+        f'"sequence":{event.sequence},'
+        f'"to_status":{string_token(event.to_status.value)}'
+        "}"
+    ).encode()
+
+
+def _fill_bytes(fill: Fill) -> bytes:
+    venue_trade_id = "null" if fill.venue_trade_id is None else string_token(fill.venue_trade_id)
+    return (
+        "{"
+        f'"account_id":{string_token(fill.account_id)},'
+        f'"event_time":{utc_token(fill.event_time)},'
+        f'"fill_id":{string_token(fill.fill_id)},'
+        f'"instrument_id":{string_token(fill.instrument_id)},'
+        f'"liquidity_role":{string_token(fill.liquidity_role.value)},'
+        f'"order_id":{string_token(fill.order_id)},'
+        f'"price":{fixed_token(fill.price)},'
+        f'"quantity":{fixed_token(fill.quantity)},'
+        f'"side":{string_token(fill.side.value)},'
+        f'"strategy_id":{string_token(fill.strategy_id)},'
+        f'"venue_trade_id":{venue_trade_id}'
+        "}"
+    ).encode()
+
+
+def _fact_hash(records: Sequence[OrderEvent] | Sequence[Fill]) -> str:
+    """Hash built-in immutable facts without constructing a duplicate dict graph."""
+
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    for index, record in enumerate(records):
+        if index:
+            digest.update(b",")
+        if isinstance(record, OrderEvent):
+            digest.update(_order_event_bytes(record))
+        elif isinstance(record, Fill):
+            digest.update(_fill_bytes(record))
+        else:
+            return _hash([execution_payload(item) for item in records])
+    digest.update(b"]")
+    return digest.hexdigest()
 
 
 def _event_sort_key(event: MarketEvent) -> tuple[object, ...]:
@@ -230,10 +282,11 @@ class DeterministicRunEngine:
                 intents = self._strategy_intents(context, event)
                 for intent in intents:
                     if type(self.risk_gate).check is RuleBookRiskGate.check:
-                        decision = self.risk_gate.check_current(
+                        decision, reservation = self.risk_gate._check_current_for_submit(
                             intent, event_time=event.available_at
                         )
                     else:
+                        reservation = None
                         account_snapshot = account_snapshot or self.ledger.snapshot(
                             event.available_at
                         )
@@ -245,7 +298,10 @@ class DeterministicRunEngine:
                             OrderStatus.ACCEPTED,
                             OrderStatus.PARTIALLY_FILLED,
                         }:
-                            self.risk_gate.reserve(intent)
+                            if reservation is None:
+                                self.risk_gate.reserve(intent)
+                            else:
+                                self.risk_gate._reserve_requirement(intent, reservation)
                     else:
                         self.broker.reject(intent, code=decision.code, message=decision.message)
                         risk_events.append(
@@ -257,22 +313,21 @@ class DeterministicRunEngine:
             raise ReplayError(f"replay failed closed at {event_id}: {exc}") from exc
 
         try:
-            order_payloads = [execution_payload(item) for item in self.broker.order_events]
-            fill_payloads = [execution_payload(item) for item in fills]
+            order_events = self.broker.order_events
             result = RunResult(
                 run_id=self.run_id,
                 seed=seed,
                 event_count=len(events),
                 order_count=len(self.broker.orders),
                 fill_count=len(fills),
-                event_sha256=_hash(order_payloads),
-                fill_sha256=_hash(fill_payloads),
+                event_sha256=_fact_hash(order_events),
+                fill_sha256=_fact_hash(fills),
                 ledger_sha256=self.ledger.journal_sha256,
             )
             self.artifacts = RunArtifacts(
                 market_events=events,
                 orders=self.broker.orders,
-                order_events=self.broker.order_events,
+                order_events=order_events,
                 fills=tuple(fills),
                 fees=tuple(fees),
                 settlements=tuple(settlements),
@@ -532,9 +587,12 @@ class DeterministicRunEngine:
         eligible = getattr(self.matching_model, "eligible", None)
         if not callable(eligible):
             return
-        for order in self.broker.open_orders:
-            if order.intent.time_in_force not in {TimeInForce.IOC, TimeInForce.FOK}:
-                continue
+        orders = (
+            self.broker.immediate_orders
+            if type(self.broker) is DeterministicBroker
+            else self.broker.open_orders
+        )
+        for order in orders:
             if eligible(order, event):
                 self.broker.expire(
                     order.order_id,

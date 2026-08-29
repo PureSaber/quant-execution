@@ -28,7 +28,7 @@ from quant_data_kit import (
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution._fixed import decimal, fixed
-from quant_execution._json import flat_sequence_bytes
+from quant_execution._json import fixed_token, flat_sequence_bytes, string_token, utc_token
 from quant_execution.contracts import (
     AccountSnapshot,
     Fee,
@@ -44,7 +44,6 @@ from quant_execution.contracts import (
     Side,
     _currency,
 )
-from quant_execution.schemas import execution_payload
 
 UTC = timezone.utc
 _OPENED_AT = datetime(1970, 1, 1, tzinfo=UTC)
@@ -203,28 +202,71 @@ class ExactAccountLedger:
 
     @property
     def journal_sha256(self) -> str:
-        payload = {
-            "transactions": [execution_payload(item) for item in self._transactions],
-            "marks": [
-                {
-                    "instrument_id": instrument_id,
-                    "price": str(price),
-                    "event_time": event_time.isoformat(),
-                    "event_id": event_id,
-                }
-                for instrument_id, (price, event_time, event_id) in sorted(self._marks.items())
-            ],
-            "fx_snapshots": [
-                {
-                    "currency": currency,
-                    "rate": str(rate),
-                    "event_time": event_time.isoformat(),
-                    "version": index + 1,
-                }
-                for index, (currency, rate, event_time) in enumerate(self._fx_history)
-            ],
-        }
-        return hashlib.sha256(_canonical(payload)).hexdigest()
+        digest = hashlib.sha256()
+        digest.update(b'{"fx_snapshots":[')
+        for index, (currency, rate, event_time) in enumerate(self._fx_history):
+            if index:
+                digest.update(b",")
+            digest.update(
+                (
+                    "{"
+                    f'"currency":{string_token(currency)},'
+                    f'"event_time":{utc_token(event_time, zulu=False)},'
+                    f'"rate":{string_token(str(rate))},'
+                    f'"version":{index + 1}'
+                    "}"
+                ).encode()
+            )
+        digest.update(b'],"marks":[')
+        for index, (instrument_id, (price, event_time, event_id)) in enumerate(
+            sorted(self._marks.items())
+        ):
+            if index:
+                digest.update(b",")
+            digest.update(
+                (
+                    "{"
+                    f'"event_id":{string_token(event_id)},'
+                    f'"event_time":{utc_token(event_time, zulu=False)},'
+                    f'"instrument_id":{string_token(instrument_id)},'
+                    f'"price":{string_token(str(price))}'
+                    "}"
+                ).encode()
+            )
+        digest.update(b'],"transactions":[')
+        for index, transaction in enumerate(self._transactions):
+            if index:
+                digest.update(b",")
+            digest.update(self._transaction_bytes(transaction))
+        digest.update(b"]}")
+        return digest.hexdigest()
+
+    @staticmethod
+    def _transaction_bytes(transaction: LedgerTransaction) -> bytes:
+        postings: list[str] = []
+        for posting in transaction.postings:
+            instrument_id = (
+                "null" if posting.instrument_id is None else string_token(posting.instrument_id)
+            )
+            postings.append(
+                "{"
+                f'"amount":{fixed_token(posting.amount)},'
+                f'"currency":{string_token(posting.currency)},'
+                f'"instrument_id":{instrument_id},'
+                f'"ledger_account":{string_token(posting.ledger_account)},'
+                f'"quantity_delta":{fixed_token(posting.quantity_delta)}'
+                "}"
+            )
+        return (
+            "{"
+            f'"event_time":{utc_token(transaction.event_time)},'
+            f'"event_type":{string_token(transaction.event_type.value)},'
+            f'"idempotency_key":{string_token(transaction.idempotency_key)},'
+            f'"postings":[{",".join(postings)}],'
+            f'"reference_id":{string_token(transaction.reference_id)},'
+            f'"transaction_id":{string_token(transaction.transaction_id)}'
+            "}"
+        ).encode()
 
     def set_fx_rate(self, currency: str, rate: FixedPoint, *, event_time: datetime) -> None:
         currency = _currency(currency)
