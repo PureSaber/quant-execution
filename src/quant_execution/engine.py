@@ -38,6 +38,7 @@ from quant_execution.contracts import (
     TimeInForce,
 )
 from quant_execution.ledger import ExactAccountLedger
+from quant_execution.matching import BarMatchingModel
 from quant_execution.protocols import MatchingModel, Strategy, StrategyContext
 from quant_execution.rules import RuleBookRiskGate
 from quant_execution.schemas import execution_payload
@@ -317,7 +318,12 @@ class DeterministicRunEngine:
                     )
                 return False
 
-            matching_checkpoint = self._capture_component(self.matching_model)
+            matching_checkpoint = (
+                None
+                if type(self.matching_model) is BarMatchingModel
+                and not self.matching_model.checkpoint_required(open_orders)
+                else self._capture_component(self.matching_model)
+            )
             matched = tuple(self.matching_model.match(event, open_orders))
             if not matched:
                 return False
@@ -334,7 +340,8 @@ class DeterministicRunEngine:
                 )
                 decision = self.risk_gate.check_fill(fill, order)
                 if not decision.accepted:
-                    self._restore_component(self.matching_model, matching_checkpoint)
+                    if matching_checkpoint is not None:
+                        self._restore_component(self.matching_model, matching_checkpoint)
                     if risk_checkpoint is not None:
                         self._restore_component(self.risk_gate, risk_checkpoint)
                     self._expire_fill_rejections(
@@ -371,7 +378,8 @@ class DeterministicRunEngine:
                     staged_fees.append(fee)
 
             if rejected:
-                self._restore_component(self.matching_model, matching_checkpoint)
+                if matching_checkpoint is not None:
+                    self._restore_component(self.matching_model, matching_checkpoint)
                 self._restore_component(self.broker, broker_checkpoint)
                 self._restore_component(self.ledger, ledger_checkpoint)
                 self._restore_component(self.risk_gate, risk_checkpoint)
@@ -401,14 +409,20 @@ class DeterministicRunEngine:
     def _commit_fill(self, fill: Fill, order: Order, event: MarketEvent) -> Fee | None:
         self.broker.apply_fill(fill)
         self.risk_gate.release_fill(fill, order)
-        self.ledger.apply_with_trading_day(
-            fill,
-            trading_day=event.trading_day,
-            create_snapshot=False,
-        )
+        if type(self.ledger) is ExactAccountLedger:
+            self.ledger._apply_replay_event(fill, trading_day=event.trading_day)
+        else:
+            self.ledger.apply_with_trading_day(
+                fill,
+                trading_day=event.trading_day,
+                create_snapshot=False,
+            )
         fee = self.risk_gate.fee_for(fill, order)
         if fee is not None:
-            self.ledger.apply(fee, create_snapshot=False)
+            if type(self.ledger) is ExactAccountLedger:
+                self.ledger._apply_replay_event(fee)
+            else:
+                self.ledger.apply(fee, create_snapshot=False)
         return fee
 
     def _expire_fill_rejections(

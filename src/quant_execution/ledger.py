@@ -28,6 +28,7 @@ from quant_data_kit import (
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution._fixed import decimal, fixed
+from quant_execution._json import flat_sequence_bytes
 from quant_execution.contracts import (
     AccountSnapshot,
     Fee,
@@ -57,7 +58,7 @@ def _canonical(value: object) -> bytes:
 
 
 def _identifier(prefix: str, *parts: object) -> str:
-    return f"{prefix}-{hashlib.sha256(_canonical(parts)).hexdigest()[:24]}"
+    return f"{prefix}-{hashlib.sha256(flat_sequence_bytes(parts)).hexdigest()[:24]}"
 
 
 @lru_cache(maxsize=256)
@@ -258,6 +259,13 @@ class ExactAccountLedger:
 
     def cash_balance(self, currency: str) -> Decimal:
         return self._accounts.get(("assets:cash", currency, None), Decimal(0))
+
+    @property
+    def has_open_derivative_position(self) -> bool:
+        return any(
+            quantity != 0 and instrument_id in self._derivative_instruments
+            for instrument_id, quantity in self._positions.items()
+        )
 
     def risk_balances(
         self, event_time: datetime
@@ -521,6 +529,7 @@ class ExactAccountLedger:
         *,
         trading_day: date | None,
         create_snapshot: bool,
+        local_rollback: bool = True,
     ) -> AccountSnapshot | None:
         self._validate_event(event)
         reference_id = self._event_identity(event)
@@ -551,8 +560,12 @@ class ExactAccountLedger:
         undo: dict[str, object] | None = None
         try:
             transaction = self._translate(event)
-            undo = self._capture_apply_undo(event, transaction, reference_id)
-            self._post(transaction)
+            if local_rollback:
+                undo = self._capture_apply_undo(event, transaction, reference_id)
+            if local_rollback:
+                self._post(transaction)
+            else:
+                self._post(transaction, local_rollback=False)
             if isinstance(event, Fill):
                 self._fills[event.fill_id] = event
                 self._fill_trading_days[event.fill_id] = trading_day
@@ -694,6 +707,26 @@ class ExactAccountLedger:
             event,
             trading_day=trading_day if isinstance(event, Fill) else None,
             create_snapshot=create_snapshot,
+        )
+
+    def _apply_replay_event(
+        self,
+        event: LedgerEvent,
+        *,
+        trading_day: date | None = None,
+    ) -> None:
+        """Apply one validated fact under the engine's whole-replay rollback boundary."""
+
+        if isinstance(event, Fill):
+            if not isinstance(trading_day, date) or isinstance(trading_day, datetime):
+                raise ValidationError("fill replay application requires a trading_day date")
+        elif trading_day is not None:
+            raise ValidationError("trading_day is only valid for fill replay application")
+        self._apply(
+            event,
+            trading_day=trading_day,
+            create_snapshot=False,
+            local_rollback=False,
         )
 
     def _validate_event(self, event: LedgerEvent) -> None:
@@ -970,7 +1003,6 @@ class ExactAccountLedger:
         quantity = decimal(fill_event.quantity)
         signed_quantity = quantity if fill_event.side is Side.BUY else -quantity
         old_quantity = self._positions.get(fill_event.instrument_id, Decimal(0))
-        average = self._average_cost(fill_event.instrument_id)
         multiplier = decimal(spec.contract_multiplier)
         price = decimal(fill_event.price)
         notional = quantity * price * multiplier
@@ -979,14 +1011,21 @@ class ExactAccountLedger:
             if old_quantity and old_quantity * signed_quantity < 0
             else Decimal(0)
         )
-        if old_quantity > 0:
-            realized = (price - average) * close_quantity * multiplier
-        elif old_quantity < 0:
-            realized = (average - price) * close_quantity * multiplier
-        else:
-            realized = Decimal(0)
+        derivative = fill_event.instrument_id in self._derivative_instruments
+        average = (
+            self._average_cost(fill_event.instrument_id)
+            if close_quantity or (not derivative and fill_event.side is Side.SELL)
+            else Decimal(0)
+        )
+        realized = Decimal(0)
+        if close_quantity:
+            realized = (
+                (price - average) * close_quantity * multiplier
+                if old_quantity > 0
+                else (average - price) * close_quantity * multiplier
+            )
         postings: list[Posting] = []
-        if self._is_derivative(spec):
+        if derivative:
             if realized:
                 postings.extend(
                     [
@@ -1278,9 +1317,25 @@ class ExactAccountLedger:
             postings=postings,
         )
 
-    def _post(self, transaction: LedgerTransaction) -> None:
+    def _post(self, transaction: LedgerTransaction, *, local_rollback: bool = True) -> None:
         if transaction.idempotency_key in self._transaction_keys:
             raise ValidationError("duplicate ledger transaction idempotency key")
+        if not local_rollback:
+            for posting in transaction.postings:
+                key = (posting.ledger_account, posting.currency, posting.instrument_id)
+                self._accounts[key] = self._accounts.get(key, Decimal(0)) + decimal(posting.amount)
+                if (
+                    posting.ledger_account == "assets:position"
+                    and posting.instrument_id is not None
+                    and posting.quantity_delta is not None
+                ):
+                    instrument_id = posting.instrument_id
+                    self._positions[instrument_id] = self._positions.get(
+                        instrument_id, Decimal(0)
+                    ) + decimal(posting.quantity_delta)
+            self._transactions.append(transaction)
+            self._transaction_keys.add(transaction.idempotency_key)
+            return
         missing = object()
         prior_accounts: dict[tuple[str, str, str | None], Decimal | object] = {}
         prior_positions: dict[str, Decimal | object] = {}

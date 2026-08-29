@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
 from datetime import datetime, timedelta
@@ -25,19 +24,19 @@ from quant_data_kit import (
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution._fixed import decimal, fixed
+from quant_execution._json import flat_sequence_bytes
 from quant_execution.broker import remaining_quantity
 from quant_execution.contracts import Fill, LiquidityRole, Order, OrderType, Side, TimeInForce
 
 
 def _fill_id(model: str, event_id: str, order_id: str, index: int, price: FixedPoint) -> str:
-    raw = json.dumps(
-        [model, event_id, order_id, index, price.units, price.scale],
-        separators=(",", ":"),
-    ).encode()
+    raw = flat_sequence_bytes((model, event_id, order_id, index, price.units, price.scale))
     return f"fill-{hashlib.sha256(raw).hexdigest()[:24]}"
 
 
-def _sort_orders(orders: Sequence[Order]) -> list[Order]:
+def _sort_orders(orders: Sequence[Order]) -> Sequence[Order]:
+    if len(orders) < 2:
+        return orders
     return sorted(orders, key=lambda item: (item.intent.created_at, item.order_id))
 
 
@@ -58,7 +57,14 @@ def _price_time_orders(orders: Sequence[Order]) -> list[Order]:
 
 
 def _quantity_from_available(order: Order, available: Decimal) -> FixedPoint:
-    remaining = decimal(remaining_quantity(order))
+    remaining_units = order.intent.quantity.units - order.filled_quantity.units
+    if remaining_units == order.intent.quantity.units:
+        remaining_fp = order.intent.quantity
+    else:
+        remaining_fp = FixedPoint(remaining_units, order.intent.quantity.scale)
+    remaining = decimal(remaining_fp)
+    if available >= remaining:
+        return remaining_fp
     amount = min(remaining, available)
     if amount <= 0:
         return FixedPoint(0, order.intent.quantity.scale)
@@ -165,8 +171,14 @@ class BarMatchingModel(_BaseMatchingModel):
     def reset(self) -> None:
         self._activated_stop_limits.clear()
 
+    @staticmethod
+    def checkpoint_required(open_orders: Sequence[Order]) -> bool:
+        return any(order.intent.order_type is OrderType.STOP_LIMIT for order in open_orders)
+
     def match(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> Sequence[Fill]:
         if not isinstance(market_event, BarEvent) or not market_event.is_complete:
+            return ()
+        if not open_orders:
             return ()
         capacity = decimal(market_event.volume) * self.participation_rate
         fills: list[Fill] = []

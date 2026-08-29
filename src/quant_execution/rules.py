@@ -20,6 +20,7 @@ from quant_data_kit import (
     QuoteEvent,
     StatusEvent,
     TradeEvent,
+    ensure_utc_datetime,
 )
 from quant_data_kit.exceptions import ValidationError
 
@@ -310,6 +311,7 @@ class RuleBookRiskGate:
         self.ledger = ledger
         self.money_scale = money_scale
         self.policies = tuple(policies)
+        self._rules: dict[str, _AssetRule] = {}
         for policy in self.policies:
             if not callable(getattr(policy, "check_order", None)) or not callable(
                 getattr(policy, "runtime_check", None)
@@ -456,7 +458,7 @@ class RuleBookRiskGate:
             if value is not None and not aligned(value, spec.price_tick):
                 return RiskDecision(False, "PRICE_TICK", f"{field_name} violates price tick")
         try:
-            decision = self._rule(spec).check(
+            decision = self._rule_for(spec).check(
                 order_intent, account_snapshot, state, spec, self.ledger
             )
             if not decision.accepted:
@@ -531,6 +533,13 @@ class RuleBookRiskGate:
         return self._check_runtime_policies(event_time=snapshot.event_time)
 
     def runtime_check_current(self, event_time: datetime) -> RiskDecision:
+        event_time = ensure_utc_datetime(event_time, field="event_time")
+        if (
+            not self.policies
+            and type(self.ledger) is ExactAccountLedger
+            and not self.ledger.has_open_derivative_position
+        ):
+            return _ACCEPTED_DECISION
         if self.ledger.liquidation_required(event_time):
             return RiskDecision(
                 False,
@@ -665,7 +674,7 @@ class RuleBookRiskGate:
         if fill.side is Side.SELL:
             return _ACCEPTED_DECISION
         state = self._states[fill.instrument_id]
-        rate = self._rule(spec).fee_rate(fill, order, state, spec, self.ledger)
+        rate = self._rule_for(spec).fee_rate(fill, order, state, spec, self.ledger)
         required = (
             decimal(fill.quantity)
             * decimal(fill.price)
@@ -690,7 +699,7 @@ class RuleBookRiskGate:
     def fee_for(self, fill: Fill, order: Order) -> Fee | None:
         spec = self.instruments[fill.instrument_id]
         state = self._states[fill.instrument_id]
-        rate = self._rule(spec).fee_rate(fill, order, state, spec, self.ledger)
+        rate = self._rule_for(spec).fee_rate(fill, order, state, spec, self.ledger)
         fee_type = "maker" if fill.liquidity_role is LiquidityRole.MAKER else "taker"
         unit_notional = decimal(fill.price) * decimal(spec.contract_multiplier)
         if spec.asset_class is AssetClass.FUTURE:
@@ -863,6 +872,13 @@ class RuleBookRiskGate:
         raise ValidationError(
             f"unsupported asset rule for {spec.asset_class.value}/{spec.product_type}"
         )
+
+    def _rule_for(self, spec: InstrumentSpec) -> _AssetRule:
+        rule = self._rules.get(spec.instrument_id)
+        if rule is None:
+            rule = self._rule(spec)
+            self._rules[spec.instrument_id] = rule
+        return rule
 
 
 def _intent_price(intent: OrderIntent, state: MarketState) -> Decimal | None:
