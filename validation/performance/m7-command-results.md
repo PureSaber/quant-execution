@@ -65,5 +65,15 @@ The same-window v0.4.1/candidate controls measured6,807.35/10,672.48 events/s. A
 2,000-event hashes are byte-identical. The candidate is therefore semantically equivalent and
 measurably faster in the controlled comparison, but it does not satisfy the release rate gate.
 
-Python3.10/3.11/3.12 CI, lock verification, commit, PR and final worktree state are appended after
-the remote checks complete.
+## Remote handoff
+
+- Implementation commit:`70df9c1aee5d49c6a1b966304b863808e3b61183`.
+- PR:[#6](https://github.com/PureSaber/quant-execution/pull/6).
+- Push CI:[run33230566607](https://github.com/PureSaber/quant-execution/actions/runs/33230566607),
+  Python3.10/3.11/3.12 all PASS.
+- PR CI:[run33230576404](https://github.com/PureSaber/quant-execution/actions/runs/33230576404),
+  Python3.10/3.11/3.12 all PASS.
+- CI installs`requirements.lock`, runs`pip check`, then installs the editable project with
+  `--no-deps --no-build-isolation` and runs`pip check`again.
+- Package version remains0.4.1, the lock and dependency declaration are unchanged, and no new tag
+  was created because the50k/s rate gate failed.
