@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-execution"
-version = "0.4.0"
+version = "0.4.1"
 description = "Deterministic execution, matching, risk and ledger for PureSaber quant research"
 readme = "README.md"
 license = {text = "MIT"}
@@ -12,11 +12,33 @@ requires-python = ">=3.10"
 dependencies = [
     "pyarrow>=14.0",
     "jsonschema>=4.20",
-    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.6.0",
+    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.6.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "pytest-cov>=5.0", "ruff==0.16.5"]
+dev = [
+    "exceptiongroup>=1",
+    "pytest>=7.4",
+    "pytest-cov>=5.0",
+    "ruff==0.16.5",
+    "tomli>=1",
+]
+
+[tool.quant-workspace]
+layer = "execution"
+schemas = [
+    { id = "puresaber.execution.order-intent", version = "1.1.0" },
+    { id = "puresaber.execution.order", version = "1.1.0" },
+    { id = "puresaber.execution.order-event", version = "1.1.0" },
+    { id = "puresaber.execution.fill", version = "1.1.0" },
+    { id = "puresaber.execution.fee", version = "1.1.0" },
+    { id = "puresaber.execution.funding", version = "1.1.0" },
+    { id = "puresaber.execution.settlement", version = "1.1.0" },
+    { id = "puresaber.execution.ledger-transaction", version = "1.1.0" },
+    { id = "puresaber.execution.account-snapshot", version = "1.1.0" },
+    { id = "puresaber.execution.run-result", version = "1.1.0" },
+]
+lock-files = ["requirements.lock"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
