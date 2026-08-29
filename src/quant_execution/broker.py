@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from copy import deepcopy
 from datetime import date, datetime
 
 from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
 
+from quant_execution._json import flat_sequence_bytes, string_token
 from quant_execution.contracts import (
     Fill,
     Order,
@@ -18,13 +18,39 @@ from quant_execution.contracts import (
     OrderStatus,
     TimeInForce,
 )
-from quant_execution.schemas import execution_payload
 from quant_execution.state_machine import transition_order
 
 
 def _digest(prefix: str, *parts: object) -> str:
-    payload = json.dumps(parts, ensure_ascii=True, separators=(",", ":"), default=str)
-    return f"{prefix}-{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
+    return f"{prefix}-{hashlib.sha256(flat_sequence_bytes(parts)).hexdigest()[:24]}"
+
+
+def _fixed_token(value: FixedPoint | None) -> str:
+    if value is None:
+        return "null"
+    return f'{{"scale":{value.scale},"units":{value.units}}}'
+
+
+def _intent_bytes(intent: OrderIntent) -> bytes:
+    """Serialize a validated intent exactly like sorted canonical execution_payload JSON."""
+
+    created_at = intent.created_at.isoformat().replace("+00:00", "Z")
+    return (
+        "{"
+        f'"account_id":{string_token(intent.account_id)},'
+        f'"created_at":{string_token(created_at)},'
+        f'"idempotency_key":{string_token(intent.idempotency_key)},'
+        f'"instrument_id":{string_token(intent.instrument_id)},'
+        f'"limit_price":{_fixed_token(intent.limit_price)},'
+        f'"order_type":{string_token(intent.order_type.value)},'
+        f'"quantity":{_fixed_token(intent.quantity)},'
+        f'"reduce_only":{"true" if intent.reduce_only else "false"},'
+        f'"side":{string_token(intent.side.value)},'
+        f'"stop_price":{_fixed_token(intent.stop_price)},'
+        f'"strategy_id":{string_token(intent.strategy_id)},'
+        f'"time_in_force":{string_token(intent.time_in_force.value)}'
+        "}"
+    ).encode()
 
 
 class DeterministicBroker:
@@ -77,6 +103,11 @@ class DeterministicBroker:
 
     @property
     def open_orders(self) -> tuple[Order, ...]:
+        if not self._open_order_ids:
+            return ()
+        if len(self._open_order_ids) == 1:
+            order_id = next(iter(self._open_order_ids))
+            return (self._orders[order_id],)
         return tuple(
             sorted(
                 (self._orders[order_id] for order_id in self._open_order_ids),
@@ -94,10 +125,7 @@ class DeterministicBroker:
 
     @staticmethod
     def _intent_hash(intent: OrderIntent) -> str:
-        payload = json.dumps(
-            execution_payload(intent), sort_keys=True, separators=(",", ":")
-        ).encode()
-        return hashlib.sha256(payload).hexdigest()
+        return hashlib.sha256(_intent_bytes(intent)).hexdigest()
 
     def submit(self, order_intent: OrderIntent) -> Order:
         if not isinstance(order_intent, OrderIntent):

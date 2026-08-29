@@ -1,0 +1,88 @@
+Sat Aug 29 10:40:24 2026    validation/performance/m7-baseline-replay-only.prof
+
+         1276819 function calls (1273646 primitive calls) in 0.537 seconds
+
+   Ordered by: cumulative time
+   List reduced from 204 to 80 due to restriction <80>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.011    0.011    0.555    0.555 engine.py:133(replay)
+     2000    0.004    0.000    0.265    0.000 engine.py:299(_match_and_commit)
+     1000    0.002    0.000    0.179    0.000 engine.py:401(_commit_fill)
+     2000    0.007    0.000    0.116    0.000 ledger.py:518(_apply)
+     2000    0.002    0.000    0.073    0.000 ledger.py:937(_translate)
+     1000    0.001    0.000    0.072    0.000 ledger.py:684(apply_with_trading_day)
+     1000    0.003    0.000    0.061    0.000 broker.py:102(submit)
+     6001    0.009    0.000    0.058    0.000 schemas.py:536(execution_payload)
+     2000    0.006    0.000    0.055    0.000 rules.py:425(_check)
+     2001    0.003    0.000    0.049    0.000 ledger.py:1263(_make_transaction)
+     1000    0.001    0.000    0.046    0.000 ledger.py:510(apply)
+     7004    0.007    0.000    0.045    0.000 __init__.py:183(dumps)
+     2000    0.007    0.000    0.045    0.000 state_machine.py:21(transition_order)
+     2000    0.006    0.000    0.045    0.000 matching.py:168(match)
+     1000    0.007    0.000    0.044    0.000 ledger.py:966(_fill_transaction)
+     1000    0.001    0.000    0.038    0.000 rules.py:398(check_open_order_current)
+     7004    0.006    0.000    0.037    0.000 encoder.py:183(encode)
+     2000    0.003    0.000    0.036    0.000 engine.py:499(_strategy_intents)
+     1000    0.003    0.000    0.034    0.000 broker.py:182(apply_fill)
+     1000    0.001    0.000    0.034    0.000 rules.py:367(check_current)
+    12002    0.016    0.000    0.032    0.000 temporal_v2.py:16(ensure_utc_datetime)
+    19004    0.030    0.000    0.030    0.000 schemas.py:501(_fixed)
+     2001    0.011    0.000    0.029    0.000 contracts.py:424(__post_init__)
+     7004    0.028    0.000    0.028    0.000 encoder.py:205(iterencode)
+     2000    0.004    0.000    0.027    0.000 benchmark_replay.py:98(on_event)
+     1000    0.001    0.000    0.026    0.000 ledger.py:1098(_cash_income_transaction)
+     1000    0.002    0.000    0.023    0.000 matching.py:115(_fill)
+     1000    0.006    0.000    0.023    0.000 rules.py:690(fee_for)
+   234138    0.020    0.000    0.023    0.000 {built-in method builtins.isinstance}
+        1    0.000    0.000    0.022    0.022 ledger.py:203(journal_sha256)
+     1005    0.001    0.000    0.022    0.000 engine.py:437(_capture_component)
+     1001    0.002    0.000    0.020    0.000 matching.py:92(capture_state)
+     3000    0.009    0.000    0.020    0.000 rules.py:810(_reservation_requirement)
+     2000    0.007    0.000    0.020    0.000 rules.py:233(check)
+    28026    0.012    0.000    0.019    0.000 contracts.py:96(_required_text)
+     2000    0.004    0.000    0.019    0.000 rules.py:728(_check_reservations)
+     1000    0.001    0.000    0.019    0.000 broker.py:95(_intent_hash)
+     2002    0.001    0.000    0.018    0.000 ledger.py:53(_canonical)
+4141/1006    0.006    0.000    0.018    0.000 copy.py:118(deepcopy)
+    60002    0.011    0.000    0.017    0.000 <string>:2(__hash__)
+     3000    0.003    0.000    0.017    0.000 broker.py:25(_digest)
+1027/1005    0.001    0.000    0.016    0.000 copy.py:217(_deepcopy_dict)
+     3000    0.002    0.000    0.015    0.000 rules.py:533(runtime_check_current)
+     2001    0.010    0.000    0.015    0.000 ledger.py:1281(_post)
+    85295    0.015    0.000    0.015    0.000 {method 'get' of 'dict' objects}
+     2000    0.004    0.000    0.014    0.000 dataclasses.py:1540(replace)
+     2000    0.005    0.000    0.013    0.000 contracts.py:230(__post_init__)
+     3000    0.003    0.000    0.013    0.000 ledger.py:462(liquidation_required)
+     2001    0.002    0.000    0.013    0.000 ledger.py:59(_identifier)
+     1000    0.004    0.000    0.012    0.000 contracts.py:286(__post_init__)
+     9000    0.005    0.000    0.012    0.000 broker.py:78(open_orders)
+    17000    0.008    0.000    0.012    0.000 rules.py:49(_metadata_decimal)
+     3000    0.006    0.000    0.011    0.000 contracts.py:184(__post_init__)
+     1000    0.003    0.000    0.011    0.000 contracts.py:324(__post_init__)
+     6001    0.002    0.000    0.010    0.000 schemas.py:497(_time)
+     1000    0.004    0.000    0.010    0.000 contracts.py:142(__post_init__)
+     1000    0.004    0.000    0.010    0.000 rules.py:632(check_fill)
+     2000    0.002    0.000    0.010    0.000 benchmark_replay.py:35(fp)
+    13006    0.007    0.000    0.010    0.000 {built-in method builtins.sorted}
+     2000    0.006    0.000    0.009    0.000 ledger.py:581(_capture_apply_undo)
+     2000    0.004    0.000    0.009    0.000 rules.py:787(_current_view)
+     1000    0.001    0.000    0.008    0.000 rules.py:471(reserve)
+     2000    0.004    0.000    0.008    0.000 fixed_point.py:32(from_decimal)
+     4000    0.004    0.000    0.007    0.000 _fixed.py:40(aligned)
+     1000    0.001    0.000    0.007    0.000 matching.py:32(_fill_id)
+     7005    0.004    0.000    0.007    0.000 {built-in method builtins.any}
+    63073    0.007    0.000    0.007    0.000 {built-in method builtins.getattr}
+    24004    0.007    0.000    0.007    0.000 {method 'utcoffset' of 'datetime.datetime' objects}
+     7000    0.003    0.000    0.007    0.000 rules.py:868(_intent_price)
+     6003    0.006    0.000    0.006    0.000 {method 'isoformat' of 'datetime.datetime' objects}
+     2000    0.004    0.000    0.006    0.000 ledger.py:410(observe_market)
+     6009    0.004    0.000    0.006    0.000 fixed_point.py:22(__post_init__)
+    39990    0.006    0.000    0.006    0.000 <string>:2(__eq__)
+     6002    0.002    0.000    0.006    0.000 ledger.py:1228(_posting)
+     1000    0.002    0.000    0.006    0.000 schemas.py:505(_intent_payload)
+    60002    0.006    0.000    0.006    0.000 {built-in method builtins.hash}
+    56052    0.006    0.000    0.006    0.000 {method 'strip' of 'str' objects}
+1011/1004    0.001    0.000    0.005    0.000 copy.py:247(_reconstruct)
+        2    0.000    0.000    0.005    0.003 engine.py:86(_hash)
+     2000    0.003    0.000    0.005    0.000 rules.py:345(observe)

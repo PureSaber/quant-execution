@@ -30,10 +30,20 @@ UTC = timezone.utc
 START = datetime(2026, 1, 2, tzinfo=UTC)
 INSTRUMENT = "crypto:benchmark:BTCUSDT"
 DENSE_ORDER_STRIDE = 2
+DENSE_2000_BASELINE = {
+    "order_sha256": "b9c9595aab6e650f0e25706ba8813f1e043dfa38a804711981175ed00375feb2",
+    "fill_sha256": "692b04a23993a8e2302ae36c262c2115e83c3d26f07fbe8b5b474f43b00705c9",
+    "ledger_sha256": "b78ea6ba6de6b2fe9bfc8dee21f7b516149fa8e94732cf93e7e9c5d4610f13b2",
+    "result_sha256": "1c43987b6c23db9f77dda68c0d872df51ebfd990eece4eca82ec44fdfccccc9f",
+}
 
 
 def fp(value: str | int, scale: int = 3) -> FixedPoint:
     return FixedPoint.from_decimal(Decimal(str(value)), scale)
+
+
+DENSE_QUANTITY = fp("0.001")
+DENSE_LIMIT_PRICE = fp("100", 2)
 
 
 def instrument() -> InstrumentSpec:
@@ -106,11 +116,11 @@ class DenseOrderStrategy:
                 strategy_id=context.strategy_id,
                 instrument_id=INSTRUMENT,
                 side=Side.BUY,
-                quantity=fp("0.001"),
+                quantity=DENSE_QUANTITY,
                 order_type=OrderType.LIMIT,
                 time_in_force=TimeInForce.GTC,
                 created_at=event.available_at,
-                limit_price=fp("100", 2),
+                limit_price=DENSE_LIMIT_PRICE,
             ),
         )
 
@@ -208,6 +218,9 @@ def worker(workload: str, event_count: int) -> int:
         assert payload["fills"] == expected_orders
         assert payload["transactions"] == expected_orders * 2 + 1
         assert payload["fill_density"] == 0.5
+        if event_count == 2_000:
+            for field, expected in DENSE_2000_BASELINE.items():
+                assert payload[field] == expected
     else:
         assert payload["orders"] == payload["order_events"] == payload["fills"] == 0
         assert payload["transactions"] == 1
@@ -294,6 +307,7 @@ def main() -> int:
     parser.add_argument("--memory-limit-gib", type=float, default=16)
     parser.add_argument("--worker", choices=("release_no_orders", "dense_matching_exact_ledger"))
     parser.add_argument("--events", type=int)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.worker is not None:
         if args.events is None or args.events <= 0:
@@ -315,7 +329,11 @@ def main() -> int:
         aggregate(name, count, args.repeat, args.require_rate, memory_limit)
         for name, count in selected
     ]
-    print(json.dumps(results, indent=2, sort_keys=True))
+    encoded = json.dumps(results, indent=2, sort_keys=True)
+    print(encoded)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(encoded + "\n", encoding="utf-8")
     return 0 if all(item["rate_gate"] and item["memory_gate"] for item in results) else 1
 
 

@@ -125,8 +125,8 @@ python tools/check_branch_coverage.py coverage.json --threshold 90 \
 python benchmarks/benchmark_replay.py --workload all --repeat 3 --require-rate 50000
 ```
 
-The 50k-events/second replay objective is an explicit local performance gate. The
-no-order workload passes; the exact 50%-fill workload remains below the gate while
-retaining all 1,000 fills, 2,001 balanced transactions, risk checks and final hashes.
-The measured shortfall and required follow-up architecture work are disclosed in
+The 50k-events/second replay objective is an explicit local performance gate. The exact
+50%-fill workload remains below the gate while retaining all 1,000 fills, 2,001 balanced
+transactions, risk checks and byte-identical v0.4.1 final hashes. The reproduced measurements,
+same-window control, profile evidence and required follow-up architecture work are disclosed in
 [`docs/performance-m3a.md`](docs/performance-m3a.md).
