@@ -436,15 +436,28 @@ class LedgerTransaction:
             or any(not isinstance(posting, Posting) for posting in self.postings)
         ):
             raise ValidationError("ledger transaction requires an immutable tuple of postings")
-        balances: dict[str, tuple[int, int]] = {}
-        for posting in self.postings:
-            prior_units, prior_scale = balances.get(posting.currency, (0, posting.amount.scale))
-            scale = max(prior_scale, posting.amount.scale)
-            balances[posting.currency] = (
-                prior_units * 10 ** (scale - prior_scale)
-                + posting.amount.units * 10 ** (scale - posting.amount.scale),
-                scale,
-            )
+        first = self.postings[0]
+        same_scale_currency = all(
+            posting.currency == first.currency and posting.amount.scale == first.amount.scale
+            for posting in self.postings[1:]
+        )
+        if same_scale_currency:
+            balances = {
+                first.currency: (
+                    sum(posting.amount.units for posting in self.postings),
+                    first.amount.scale,
+                )
+            }
+        else:
+            balances: dict[str, tuple[int, int]] = {}
+            for posting in self.postings:
+                prior_units, prior_scale = balances.get(posting.currency, (0, posting.amount.scale))
+                scale = max(prior_scale, posting.amount.scale)
+                balances[posting.currency] = (
+                    prior_units * 10 ** (scale - prior_scale)
+                    + posting.amount.units * 10 ** (scale - posting.amount.scale),
+                    scale,
+                )
         unbalanced = {
             currency: {"units": units, "scale": scale}
             for currency, (units, scale) in balances.items()

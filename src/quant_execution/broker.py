@@ -9,7 +9,7 @@ from datetime import date, datetime
 from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
 
-from quant_execution._json import flat_sequence_bytes, string_token
+from quant_execution._json import fixed_token, flat_sequence_bytes, string_token
 from quant_execution.contracts import (
     Fill,
     Order,
@@ -25,12 +25,6 @@ def _digest(prefix: str, *parts: object) -> str:
     return f"{prefix}-{hashlib.sha256(flat_sequence_bytes(parts)).hexdigest()[:24]}"
 
 
-def _fixed_token(value: FixedPoint | None) -> str:
-    if value is None:
-        return "null"
-    return f'{{"scale":{value.scale},"units":{value.units}}}'
-
-
 def _intent_bytes(intent: OrderIntent) -> bytes:
     """Serialize a validated intent exactly like sorted canonical execution_payload JSON."""
 
@@ -41,12 +35,12 @@ def _intent_bytes(intent: OrderIntent) -> bytes:
         f'"created_at":{string_token(created_at)},'
         f'"idempotency_key":{string_token(intent.idempotency_key)},'
         f'"instrument_id":{string_token(intent.instrument_id)},'
-        f'"limit_price":{_fixed_token(intent.limit_price)},'
+        f'"limit_price":{fixed_token(intent.limit_price)},'
         f'"order_type":{string_token(intent.order_type.value)},'
-        f'"quantity":{_fixed_token(intent.quantity)},'
+        f'"quantity":{fixed_token(intent.quantity)},'
         f'"reduce_only":{"true" if intent.reduce_only else "false"},'
         f'"side":{string_token(intent.side.value)},'
-        f'"stop_price":{_fixed_token(intent.stop_price)},'
+        f'"stop_price":{fixed_token(intent.stop_price)},'
         f'"strategy_id":{string_token(intent.strategy_id)},'
         f'"time_in_force":{string_token(intent.time_in_force.value)}'
         "}"
@@ -64,6 +58,8 @@ class DeterministicBroker:
     def reset(self) -> None:
         self._orders: dict[str, Order] = {}
         self._open_order_ids: set[str] = set()
+        self._day_order_ids: set[str] = set()
+        self._immediate_order_ids: set[str] = set()
         self._submit_keys: dict[str, tuple[str, str]] = {}
         self._cancel_keys: dict[str, tuple[str, OrderEvent]] = {}
         self._fill_keys: dict[str, tuple[Fill, OrderEvent]] = {}
@@ -75,6 +71,8 @@ class DeterministicBroker:
             {
                 "orders": self._orders,
                 "open_order_ids": self._open_order_ids,
+                "day_order_ids": self._day_order_ids,
+                "immediate_order_ids": self._immediate_order_ids,
                 "submit_keys": self._submit_keys,
                 "cancel_keys": self._cancel_keys,
                 "fill_keys": self._fill_keys,
@@ -87,6 +85,8 @@ class DeterministicBroker:
         restored = deepcopy(state)
         self._orders = restored["orders"]
         self._open_order_ids = restored["open_order_ids"]
+        self._day_order_ids = restored["day_order_ids"]
+        self._immediate_order_ids = restored["immediate_order_ids"]
         self._submit_keys = restored["submit_keys"]
         self._cancel_keys = restored["cancel_keys"]
         self._fill_keys = restored["fill_keys"]
@@ -115,6 +115,17 @@ class DeterministicBroker:
             )
         )
 
+    @property
+    def immediate_orders(self) -> tuple[Order, ...]:
+        if not self._immediate_order_ids:
+            return ()
+        return tuple(
+            sorted(
+                (self._orders[order_id] for order_id in self._immediate_order_ids),
+                key=self._sort_key,
+            )
+        )
+
     def get_order(self, order_id: str) -> Order:
         """Return one order without sorting the complete historical order set."""
         return self._require_order(order_id)
@@ -138,15 +149,24 @@ class DeterministicBroker:
                 raise ValidationError("submit idempotency key reused with different intent")
             return self._orders[order_id]
         order_id = _digest("ord", order_intent.idempotency_key, semantic_hash)
-        order = Order(order_id=order_id, intent=order_intent)
-        accepted, event = transition_order(
-            order,
-            OrderStatus.ACCEPTED,
+        filled = FixedPoint(0, order_intent.quantity.scale)
+        accepted = self._order_fact(
+            order_id,
+            order_intent,
+            status=OrderStatus.ACCEPTED,
+            filled_quantity=filled,
+            version=1,
+        )
+        event = self._event_fact(
             event_id=_digest("oev", order_id, 1, "accepted"),
-            event_time=order_intent.created_at,
+            order=accepted,
+            from_status=OrderStatus.CREATED,
+            fill_quantity=None,
         )
         self._orders[order_id] = accepted
         self._open_order_ids.add(order_id)
+        if order_intent.time_in_force in {TimeInForce.IOC, TimeInForce.FOK}:
+            self._immediate_order_ids.add(order_id)
         self._submit_keys[order_intent.idempotency_key] = (order_id, semantic_hash)
         self._events.append(event)
         return accepted
@@ -203,6 +223,8 @@ class DeterministicBroker:
         )
         self._orders[order_id] = updated
         self._open_order_ids.remove(order_id)
+        self._day_order_ids.discard(order_id)
+        self._immediate_order_ids.discard(order_id)
         self._cancel_keys[idempotency_key] = (order_id, event)
         self._events.append(event)
         return event
@@ -227,22 +249,40 @@ class DeterministicBroker:
             raise ValidationError("fill side differs from order intent")
         if fill.quantity.scale != order.intent.quantity.scale:
             raise ValidationError("fill quantity scale differs from order intent")
+        if not fill.quantity.is_positive():
+            raise ValidationError("fill quantity must be positive")
         remaining = order.intent.quantity.units - order.filled_quantity.units
         if fill.quantity.units > remaining:
             raise ValidationError("fill would violate order quantity conservation")
         target = (
             OrderStatus.FILLED if fill.quantity.units == remaining else OrderStatus.PARTIALLY_FILLED
         )
-        updated, event = transition_order(
-            order,
-            target,
-            event_id=_digest("oev", order.order_id, order.version + 1, target.value, fill.fill_id),
-            event_time=fill.event_time,
+        if fill.event_time < order.intent.created_at:
+            raise ValidationError("order event_time cannot precede intent created_at")
+        next_version = order.version + 1
+        filled_quantity = FixedPoint(
+            order.filled_quantity.units + fill.quantity.units,
+            order.filled_quantity.scale,
+        )
+        updated = self._order_fact(
+            order.order_id,
+            order.intent,
+            status=target,
+            filled_quantity=filled_quantity,
+            version=next_version,
+        )
+        event = self._event_fact(
+            event_id=_digest("oev", order.order_id, next_version, target.value, fill.fill_id),
+            order=updated,
+            from_status=order.status,
             fill_quantity=fill.quantity,
+            event_time=fill.event_time,
         )
         self._orders[order.order_id] = updated
         if target is OrderStatus.FILLED:
             self._open_order_ids.remove(order.order_id)
+            self._day_order_ids.discard(order.order_id)
+            self._immediate_order_ids.discard(order.order_id)
         self._events.append(event)
         self._fill_keys[fill.fill_id] = (fill, event)
         return event
@@ -260,15 +300,26 @@ class DeterministicBroker:
         )
         self._orders[order_id] = updated
         self._open_order_ids.remove(order_id)
+        self._day_order_ids.discard(order_id)
+        self._immediate_order_ids.discard(order_id)
         self._events.append(event)
         return event
 
     def note_trading_day(self, order_id: str, trading_day: date) -> None:
-        self._accepted_day.setdefault(order_id, trading_day)
+        order = self._orders.get(order_id)
+        if order is not None and order.intent.time_in_force is TimeInForce.DAY:
+            self._accepted_day.setdefault(order_id, trading_day)
+            self._day_order_ids.add(order_id)
 
     def expire_day_orders(self, trading_day: date, event_time: datetime) -> tuple[OrderEvent, ...]:
+        if not self._day_order_ids:
+            return ()
         expired: list[OrderEvent] = []
-        for order in self.open_orders:
+        orders = sorted(
+            (self._orders[order_id] for order_id in self._day_order_ids),
+            key=self._sort_key,
+        )
+        for order in orders:
             accepted_day = self._accepted_day.get(order.order_id)
             if (
                 order.intent.time_in_force is TimeInForce.DAY
@@ -289,6 +340,43 @@ class DeterministicBroker:
             return self._orders[order_id]
         except KeyError as exc:
             raise ValidationError(f"unknown order_id: {order_id}") from exc
+
+    @staticmethod
+    def _order_fact(
+        order_id: str,
+        intent: OrderIntent,
+        *,
+        status: OrderStatus,
+        filled_quantity: FixedPoint,
+        version: int,
+    ) -> Order:
+        order = object.__new__(Order)
+        object.__setattr__(order, "order_id", order_id)
+        object.__setattr__(order, "intent", intent)
+        object.__setattr__(order, "status", status)
+        object.__setattr__(order, "filled_quantity", filled_quantity)
+        object.__setattr__(order, "version", version)
+        return order
+
+    @staticmethod
+    def _event_fact(
+        *,
+        event_id: str,
+        order: Order,
+        from_status: OrderStatus,
+        fill_quantity: FixedPoint | None,
+        event_time: datetime | None = None,
+    ) -> OrderEvent:
+        event = object.__new__(OrderEvent)
+        object.__setattr__(event, "event_id", event_id)
+        object.__setattr__(event, "order_id", order.order_id)
+        object.__setattr__(event, "event_time", event_time or order.intent.created_at)
+        object.__setattr__(event, "sequence", order.version)
+        object.__setattr__(event, "from_status", from_status)
+        object.__setattr__(event, "to_status", order.status)
+        object.__setattr__(event, "fill_quantity", fill_quantity)
+        object.__setattr__(event, "reason", "")
+        return event
 
 
 def remaining_quantity(order: Order) -> FixedPoint:
