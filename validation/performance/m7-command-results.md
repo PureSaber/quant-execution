@@ -24,6 +24,13 @@ logical and physical hashes, retain its artifacts and pass strict post-run reloa
 Rollback is a Git revert of the M7 candidate. The unchanged in-memory `replay` method remains the
 runtime compatibility fallback. Historical tags and artifacts are not rewritten.
 
+The first independent review was `CONDITIONAL` and identified two correctness gaps. Commit
+`99eac282b1d31e33828a2d18e0efa42f983ef049` fixes both: a failed later replay now restores the
+previous completed `stored_artifacts` handle, and a finalized streaming ledger keeps its public
+transaction count and journal hash consistent with the stored ledger. Regression tests exercise
+both states. The same review also required the memory claim to be narrowed from strict O(1) to the
+measured10-million-event envelope; the runtime and documentation now use that precise scope.
+
 ## Tests and coverage
 
 Locked local environment:
@@ -41,15 +48,15 @@ python tools/check_branch_coverage.py coverage.json --threshold 90 \
 
 - `pip check`:PASS.
 - Ruff format/check:PASS.
-- Python3.12:199 passed; total coverage95.45%.
+- Python3.12:200 passed; total coverage95.44%.
 - Pure branch coverage:artifacts94.74%, broker95.35%, contracts91.88%, schemas94.74%,
-  engine91.84%, matching93.25%, state_machine96.67%, ledger91.46%, rules92.38%.
-- GitHub Actions run`33250652558`:Python3.10/3.11/3.12 all PASS.
-- GitHub Actions run`33250654222`:Python3.10/3.11/3.12 all PASS.
+  engine91.84%, matching93.25%, state_machine96.67%, ledger91.47%, rules92.38%.
+- GitHub Actions run`33251586735`:Python3.10/3.11/3.12 all PASS.
+- GitHub Actions run`33251588866`:Python3.10/3.11/3.12 all PASS.
 
 ## Formal performance evidence
 
-Source commit:`f41edc86dbd92667312998372c536d4882f8ae8f`.
+Source commit:`99eac282b1d31e33828a2d18e0efa42f983ef049`.
 
 ```text
 TEMP=F:\puresaber-m7-temp
@@ -57,7 +64,7 @@ TMP=F:\puresaber-m7-temp
 python benchmarks/benchmark_replay.py --workload matching \
   --matching-events 10000000 --repeat 3 --require-rate 50000 \
   --memory-limit-gib 16 --artifact-mode arrow \
-  --artifact-root F:\puresaber-m7-artifacts\execution-final-10m-f41edc8 \
+  --artifact-root F:\puresaber-m7-artifacts\execution-final2-10m-99eac28 \
   --artifact-retention keep --artifact-batch-size 8192 \
   --artifact-queue-batches 2 \
   --output validation\performance\m7-execution-final-10m.json
@@ -65,27 +72,27 @@ python benchmarks/benchmark_replay.py --workload matching \
 
 | Run | Events/s | Peak working set | Strict reload | Dirty tree |
 |---:|---:|---:|---|---|
-| 1 | 61,879.49 | 2,240.21MiB | PASS | false |
-| 2 | 63,673.68 | 2,236.92MiB | PASS | false |
-| 3 | 63,057.50 | 2,237.29MiB | PASS | false |
+| 1 | 59,340.69 | 2,233.67MiB | PASS | false |
+| 2 | 62,627.03 | 2,234.61MiB | PASS | false |
+| 3 | 52,966.75 | 2,236.26MiB | PASS | false |
 
-- Rate gate:PASS for every run; median63,057.50 events/second.
-- Memory gate:PASS; maximum2,240.21MiB.
+- Rate gate:PASS for every run; median59,340.69 events/second.
+- Memory gate:PASS; maximum2,236.26MiB.
 - Each run:10,000,000 events,500,000 orders/fills,1,000,000 order events and
   1,000,001 balanced ledger transactions; explicit fill density5% (`order_stride=20`).
 - Determinism:all logical hashes, every Arrow physical file hash and the manifest hash match across
   all three fresh processes.
 - Artifact manifest SHA-256:`c87db59076f852248416df828ff43cbc7dc96cbf196547e97f6e70081c111f27`.
-- Final report SHA-256:`089fd422c92dc66222fe41e6594224d8e12c490dfbe2ffe1ef48290302cd0010`.
+- Final report SHA-256:`a26c9f0eefeb9b0150c9c1ed93b8163a57ec603c8349082847b3927755bec634`.
 - Dependencies:Python3.12.5, PyArrow25.0.1, quant-data-kit distribution0.6.1.
 - Machine:Windows11,16 logical CPUs; process peak working set includes Arrow and live replay state.
 - Retained artifacts:three directories,1,501,955,792 bytes each (about4.20GiB total), under
-  `F:\puresaber-m7-artifacts\execution-final-10m-f41edc8`; no file was automatically removed.
+  `F:\puresaber-m7-artifacts\execution-final2-10m-99eac28`; no file was automatically removed.
 
 The timed interval includes event materialization, matching, risk, fill, fee, exact ledger,
 canonical serialization, Arrow initialization/write/seal, logical hashes and manifest close.
 Process startup, one static fixture-template construction and strict post-run reload are excluded;
-strict reload is independently required and passed in2.98–3.09seconds per run.
+strict reload is independently required and passed in3.18–3.32seconds per run.
 
 ## Dense stress and remaining risks
 
@@ -103,6 +110,10 @@ Remaining risks:
 - physical Arrow hashes depend on the locked PyArrow serialization version and must be rebaselined,
   never silently accepted, after a dependency upgrade;
 - the dense50%-fill stress gate is still a known capacity limitation;
+- the slowest representative run passed by only5.9%, so future releases must retain the per-run
+  gate and15% regression comparison instead of relying on the median;
+- Arrow buffers are bounded, while event/fill identity sets and broker lookup/idempotency state
+  still scale with input/order count; the certified claim is controlled memory at10M, not O(1);
 - this PR must remain unmerged until the independent M7 validator and cross-repository certification
   gate accept its committed evidence.
 

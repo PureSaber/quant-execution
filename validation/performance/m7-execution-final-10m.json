@@ -26,9 +26,9 @@
     "artifact_manifest_sha256": "c87db59076f852248416df828ff43cbc7dc96cbf196547e97f6e70081c111f27",
     "artifact_mode": "arrow",
     "artifact_paths": [
-      "F:\\puresaber-m7-artifacts\\execution-final-10m-f41edc8\\matching_exact_ledger-10000000-31312",
-      "F:\\puresaber-m7-artifacts\\execution-final-10m-f41edc8\\matching_exact_ledger-10000000-27628",
-      "F:\\puresaber-m7-artifacts\\execution-final-10m-f41edc8\\matching_exact_ledger-10000000-36912"
+      "F:\\puresaber-m7-artifacts\\execution-final2-10m-99eac28\\matching_exact_ledger-10000000-2408",
+      "F:\\puresaber-m7-artifacts\\execution-final2-10m-99eac28\\matching_exact_ledger-10000000-38204",
+      "F:\\puresaber-m7-artifacts\\execution-final2-10m-99eac28\\matching_exact_ledger-10000000-10272"
     ],
     "artifact_queue_batches": 2,
     "artifact_retention": [
@@ -37,30 +37,30 @@
       "keep"
     ],
     "artifact_volume_free_gib_after_cleanup_runs": [
-      289.68,
-      288.28,
-      286.88
+      285.48,
+      284.08,
+      282.69
     ],
     "artifact_volume_free_gib_before_cleanup_runs": [
-      289.68,
-      288.28,
-      286.88
+      285.48,
+      284.08,
+      282.69
     ],
     "dependencies": {
       "pyarrow": "25.0.1",
       "quant_data_kit": "0.6.1"
     },
     "events": 10000000,
-    "events_per_s_median": 63057.5,
+    "events_per_s_median": 59340.69,
     "events_per_s_runs": [
-      61879.49,
-      63673.68,
-      63057.5
+      59340.69,
+      62627.03,
+      52966.75
     ],
     "fill_density": 0.05,
     "fill_sha256": "68932897888ac2f362bb46191fb2c94bdc7fcc99c46d45b5329c4671ab951dff",
     "fills": 500000,
-    "git_commit": "f41edc86dbd92667312998372c536d4882f8ae8f",
+    "git_commit": "99eac282b1d31e33828a2d18e0efa42f983ef049",
     "git_dirty_runs": [
       false,
       false,
@@ -79,19 +79,19 @@
     "order_sha256": "85e3b7ea894109a4380c478c344207dd57975d6d79ba22a8f41fbe190bc5c4d5",
     "order_stride": 20,
     "orders": 500000,
-    "peak_working_set_mib": 2240.21,
+    "peak_working_set_mib": 2236.26,
     "peak_working_set_mib_runs": [
-      2240.21,
-      2236.92,
-      2237.29
+      2233.67,
+      2234.61,
+      2236.26
     ],
     "python": "3.12.5 (tags/v3.12.5:ff3bc82, Aug  6 2024, 20:45:27) [MSC v.1940 64 bit (AMD64)]",
     "rate_gate": true,
     "result_sha256": "cb5907d36a01178d57ad46f4743fed9b1546b2f13ead58b5ce6d016c0cb37db2",
     "strict_verification_elapsed_s_runs": [
-      3.088668,
-      2.983919,
-      2.988764
+      3.186086,
+      3.263401,
+      3.317333
     ],
     "strict_verification_passed": true,
     "temp_directories": [
@@ -102,9 +102,9 @@
     "timing_scope": "includes event materialization, matching, risk, fill, fee, exact ledger, Arrow sink initialization/write/seal, logical hashes, and manifest close; excludes process startup and static fixture-template construction",
     "transactions": 1000001,
     "worker_pids": [
-      31312,
-      27628,
-      36912
+      2408,
+      38204,
+      10272
     ],
     "workload": "matching_exact_ledger"
   }

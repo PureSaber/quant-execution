@@ -4,7 +4,7 @@
 
 The candidate adds an artifact-retention-bounded Arrow path without replacing the frozen
 Python reference path. Correctness, compatibility and coverage gates pass. From clean commit
-`f41edc86dbd92667312998372c536d4882f8ae8f`, all three independent10-million-event processes pass
+`99eac282b1d31e33828a2d18e0efa42f983ef049`, all three independent10-million-event processes pass
 the50,000-events/second and16GiB gates; no calibration result is promoted to release evidence.
 
 ## Architecture and compatibility
@@ -75,19 +75,19 @@ output-volume, strict-verification and per-process fields live in the committed 
 
 | Run | Events/s | Peak working set | Strict reload |
 |---:|---:|---:|---|
-| 1 | 61,879.49 | 2,240.21MiB | PASS |
-| 2 | 63,673.68 | 2,236.92MiB | PASS |
-| 3 | 63,057.50 | 2,237.29MiB | PASS |
+| 1 | 59,340.69 | 2,233.67MiB | PASS |
+| 2 | 62,627.03 | 2,234.61MiB | PASS |
+| 3 | 52,966.75 | 2,236.26MiB | PASS |
 
 Each run processed10,000,000 events,500,000 fills and1,000,001 exact ledger transactions. All
 logical hashes, physical Arrow hashes and the manifest hash were identical across fresh processes.
 The three retained artifact directories contain1,501,955,792 bytes each. The machine-readable
 evidence is `validation/performance/m7-execution-final-10m.json`; its SHA-256 is
-`089fd422c92dc66222fe41e6594224d8e12c490dfbe2ffe1ef48290302cd0010`.
+`a26c9f0eefeb9b0150c9c1ed93b8163a57ec603c8349082847b3927755bec634`.
 
 The Arrow buffers and writer queue are bounded, but replay identity sets and broker order/index
 state still scale with event or order count. The claim is therefore controlled memory at the
-certified10-million-event envelope (maximum2,240.21MiB), not strict input-independent O(1) memory.
+certified10-million-event envelope (maximum2,236.26MiB), not strict input-independent O(1) memory.
 
 ## Dense-stress limitation
 
