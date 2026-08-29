@@ -1,0 +1,3 @@
+# Cross-interpreter resolver constraints for the audited Python 3.10-3.12 lock.
+# rpds-py>=2026.6 has no Python 3.10 wheel, while jsonschema leaves it unbounded.
+rpds-py<0.31
