@@ -121,7 +121,7 @@ class DeterministicBroker:
         self._artifact_sink = None
 
     def start_artifact_stream(self, sink: object) -> None:
-        """Route immutable history to a bounded sink while retaining live broker state."""
+        """Route immutable history to a bounded sink while retaining lookup/idempotency state."""
 
         if self._orders or self._events or self._artifact_sink is not None:
             raise ValidationError("broker artifact streaming must start immediately after reset")

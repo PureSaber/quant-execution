@@ -131,6 +131,7 @@ class ExactAccountLedger:
         self._transactions: list[LedgerTransaction] = []
         self._transaction_count = 0
         self._artifact_sink = None
+        self._finalized_journal_sha256: str | None = None
         self._transaction_keys: set[str] = set()
         self._event_fingerprints: dict[str, LedgerEvent | bytes] = {}
         self._fills: dict[str, Fill] = {}
@@ -180,8 +181,23 @@ class ExactAccountLedger:
         self._transaction_count = len(self._transactions)
         self._transactions.clear()
 
-    def finish_artifact_stream(self) -> None:
+    def finish_artifact_stream(self, *, journal_sha256: str | None = None) -> str | None:
+        if self._artifact_sink is None:
+            return self._finalized_journal_sha256
+        if journal_sha256 is None:
+            calculate = getattr(self._artifact_sink, "ledger_sha256", None)
+            if not callable(calculate):
+                raise ValidationError("artifact sink cannot finalize the ledger journal hash")
+            journal_sha256 = calculate(fx_history=self._fx_history, marks=self._marks)
+        if (
+            not isinstance(journal_sha256, str)
+            or len(journal_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in journal_sha256)
+        ):
+            raise ValidationError("finalized ledger journal hash must be lowercase SHA-256")
+        self._finalized_journal_sha256 = journal_sha256
         self._artifact_sink = None
+        return journal_sha256
 
     def abort_artifact_stream(self) -> None:
         self._artifact_sink = None
@@ -191,6 +207,7 @@ class ExactAccountLedger:
             {
                 "transactions": self._transactions,
                 "transaction_count": self._transaction_count,
+                "finalized_journal_sha256": self._finalized_journal_sha256,
                 "transaction_keys": self._transaction_keys,
                 "event_fingerprints": self._event_fingerprints,
                 "fills": self._fills,
@@ -212,6 +229,7 @@ class ExactAccountLedger:
         restored = deepcopy(state)
         self._transactions = restored["transactions"]
         self._transaction_count = restored["transaction_count"]
+        self._finalized_journal_sha256 = restored["finalized_journal_sha256"]
         self._transaction_keys = restored["transaction_keys"]
         self._event_fingerprints = restored["event_fingerprints"]
         self._fills = restored["fills"]
@@ -234,11 +252,17 @@ class ExactAccountLedger:
     @property
     def transaction_count(self) -> int:
         return (
-            self._transaction_count if self._artifact_sink is not None else len(self._transactions)
+            self._transaction_count
+            if self._artifact_sink is not None or self._finalized_journal_sha256 is not None
+            else len(self._transactions)
         )
 
     @property
     def journal_sha256(self) -> str:
+        if self._finalized_journal_sha256 is not None:
+            return self._finalized_journal_sha256
+        if self._artifact_sink is not None:
+            raise ValidationError("ledger journal hash is unavailable until artifact finalization")
         digest = hashlib.sha256()
         digest.update(b'{"fx_snapshots":[')
         for index, (currency, rate, event_time) in enumerate(self._fx_history):

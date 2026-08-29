@@ -377,8 +377,8 @@ class DeterministicRunEngine:
         """Replay a pre-sorted event stream into bounded Arrow artifacts.
 
         This opt-in migration path preserves ``replay`` and ``RunArtifacts`` while avoiding
-        complete in-memory retention. The input must already use the public deterministic sort
-        order; accepting and sorting an unbounded stream would violate the memory guarantee.
+        complete in-memory artifact retention. The input must already use the public deterministic
+        sort order; accepting and sorting the full stream would retain every input event.
         """
 
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
@@ -532,9 +532,13 @@ class DeterministicRunEngine:
                         )
 
             self.broker.finish_artifact_stream()
-            self.ledger.finish_artifact_stream()
-            self._active_sink = None
             sink.seal()
+            ledger_sha256 = sink.ledger_sha256(
+                fx_history=self.ledger._fx_history,
+                marks=self.ledger._marks,
+            )
+            self.ledger.finish_artifact_stream(journal_sha256=ledger_sha256)
+            self._active_sink = None
             result = RunResult(
                 run_id=self.run_id,
                 seed=seed,
@@ -543,10 +547,7 @@ class DeterministicRunEngine:
                 fill_count=sink.counts["fills"],
                 event_sha256=sink.logical_sha256("order_events"),
                 fill_sha256=sink.logical_sha256("fills"),
-                ledger_sha256=sink.ledger_sha256(
-                    fx_history=self.ledger._fx_history,
-                    marks=self.ledger._marks,
-                ),
+                ledger_sha256=ledger_sha256,
             )
             self.stored_artifacts = sink.close(
                 {
@@ -786,6 +787,7 @@ class DeterministicRunEngine:
             "matching_model": self._capture_component(self.matching_model),
             "strategy": self._capture_component(self.strategy),
             "artifacts": deepcopy(self.artifacts),
+            "stored_artifacts": deepcopy(self.stored_artifacts),
         }
 
     def _restore_state(self, checkpoint: dict[str, object]) -> None:
@@ -795,6 +797,7 @@ class DeterministicRunEngine:
         self._restore_component(self.matching_model, checkpoint["matching_model"])
         self._restore_component(self.strategy, checkpoint["strategy"])
         self.artifacts = checkpoint["artifacts"]
+        self.stored_artifacts = checkpoint["stored_artifacts"]
 
     @staticmethod
     def _validated_events(event_stream: Iterable[MarketEvent]) -> tuple[MarketEvent, ...]:
