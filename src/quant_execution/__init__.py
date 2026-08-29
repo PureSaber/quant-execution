@@ -1,5 +1,10 @@
 """Deterministic execution contracts for PureSaber."""
 
+from quant_execution.artifacts import (
+    ArrowReplayArtifactSink,
+    StoredRunArtifacts,
+    load_stored_artifacts,
+)
 from quant_execution.broker import DeterministicBroker, remaining_quantity
 from quant_execution.contracts import (
     AccountSnapshot,
@@ -71,7 +76,7 @@ from quant_execution.schemas import (
 )
 from quant_execution.state_machine import ALLOWED_TRANSITIONS, transition_order
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 __all__ = [
     "ACCOUNT_SNAPSHOT_SCHEMA_ID",
@@ -90,6 +95,7 @@ __all__ = [
     "AShareRule",
     "AccountLedger",
     "AccountSnapshot",
+    "ArrowReplayArtifactSink",
     "BarMatchingModel",
     "BrokerSimulator",
     "CryptoSpotRule",
@@ -127,6 +133,7 @@ __all__ = [
     "RunResult",
     "Settlement",
     "Side",
+    "StoredRunArtifacts",
     "Strategy",
     "StrategyContext",
     "TimeInForce",
@@ -134,6 +141,7 @@ __all__ = [
     "execution_payload",
     "get_arrow_schema",
     "get_json_schema",
+    "load_stored_artifacts",
     "remaining_quantity",
     "transition_order",
     "validate_arrow_table",

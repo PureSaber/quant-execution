@@ -3,7 +3,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .coverage
-.venv/
+coverage*.json
+.venv*/
 build/
 dist/
 *.egg-info/
+validation/performance/*.prof
+validation/performance/m7-lead-*
+validation/performance/m7-streaming-slope-*.json
+validation/performance/scratch-*

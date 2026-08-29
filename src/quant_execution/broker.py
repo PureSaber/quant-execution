@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from copy import deepcopy
 from datetime import date, datetime
 
@@ -10,12 +11,15 @@ from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution._json import fixed_token, flat_sequence_bytes, string_token
+from quant_execution.artifacts import fill_bytes, order_bytes, order_event_bytes
 from quant_execution.contracts import (
     Fill,
     Order,
     OrderEvent,
     OrderIntent,
     OrderStatus,
+    OrderType,
+    Side,
     TimeInForce,
 )
 from quant_execution.state_machine import transition_order
@@ -47,6 +51,54 @@ def _intent_bytes(intent: OrderIntent) -> bytes:
     ).encode()
 
 
+def _fixed_from_payload(payload: dict[str, int] | None) -> FixedPoint | None:
+    return None if payload is None else FixedPoint(payload["units"], payload["scale"])
+
+
+def _time_from_payload(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _order_from_bytes(payload: bytes) -> Order:
+    value = json.loads(payload)
+    raw_intent = value["intent"]
+    intent = OrderIntent(
+        idempotency_key=raw_intent["idempotency_key"],
+        account_id=raw_intent["account_id"],
+        strategy_id=raw_intent["strategy_id"],
+        instrument_id=raw_intent["instrument_id"],
+        side=Side(raw_intent["side"]),
+        quantity=_fixed_from_payload(raw_intent["quantity"]),
+        order_type=OrderType(raw_intent["order_type"]),
+        time_in_force=TimeInForce(raw_intent["time_in_force"]),
+        created_at=_time_from_payload(raw_intent["created_at"]),
+        limit_price=_fixed_from_payload(raw_intent["limit_price"]),
+        stop_price=_fixed_from_payload(raw_intent["stop_price"]),
+        reduce_only=raw_intent["reduce_only"],
+    )
+    return Order(
+        order_id=value["order_id"],
+        intent=intent,
+        status=OrderStatus(value["status"]),
+        filled_quantity=_fixed_from_payload(value["filled_quantity"]),
+        version=value["version"],
+    )
+
+
+def _event_from_bytes(payload: bytes) -> OrderEvent:
+    value = json.loads(payload)
+    return OrderEvent(
+        event_id=value["event_id"],
+        order_id=value["order_id"],
+        event_time=_time_from_payload(value["event_time"]),
+        sequence=value["sequence"],
+        from_status=OrderStatus(value["from_status"]),
+        to_status=OrderStatus(value["to_status"]),
+        fill_quantity=_fixed_from_payload(value["fill_quantity"]),
+        reason=value["reason"],
+    )
+
+
 class DeterministicBroker:
     """Research-only broker with idempotent submit/cancel and immutable facts."""
 
@@ -56,20 +108,56 @@ class DeterministicBroker:
         self.reset()
 
     def reset(self) -> None:
-        self._orders: dict[str, Order] = {}
+        self._orders: dict[str, Order | bytes] = {}
+        self._order_count = 0
         self._open_order_ids: set[str] = set()
         self._day_order_ids: set[str] = set()
         self._immediate_order_ids: set[str] = set()
         self._submit_keys: dict[str, tuple[str, str]] = {}
         self._cancel_keys: dict[str, tuple[str, OrderEvent]] = {}
-        self._fill_keys: dict[str, tuple[Fill, OrderEvent]] = {}
+        self._fill_keys: dict[str, tuple[bytes, bytes] | tuple[Fill, OrderEvent]] = {}
         self._events: list[OrderEvent] = []
         self._accepted_day: dict[str, date] = {}
+        self._artifact_sink = None
+
+    def start_artifact_stream(self, sink: object) -> None:
+        """Route immutable history to a bounded sink while retaining live broker state."""
+
+        if self._orders or self._events or self._artifact_sink is not None:
+            raise ValidationError("broker artifact streaming must start immediately after reset")
+        if not callable(getattr(sink, "append", None)):
+            raise ValidationError("artifact sink must provide append(stream, payload)")
+        self._artifact_sink = sink
+
+    def finish_artifact_stream(self) -> None:
+        """Persist the final state of orders that remained open at replay completion."""
+
+        sink = self._artifact_sink
+        if sink is None:
+            return
+        for order in self.open_orders:
+            sink.append("orders", order_bytes(order))
+        self._artifact_sink = None
+
+    def abort_artifact_stream(self) -> None:
+        self._artifact_sink = None
+
+    def _record_event(self, event: OrderEvent, order: Order) -> None:
+        sink = self._artifact_sink
+        if sink is None:
+            self._events.append(event)
+            return
+        sink.append("order_events", order_event_bytes(event))
+        if order.status not in {OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED}:
+            payload = order_bytes(order)
+            sink.append("orders", payload)
+            self._orders[order.order_id] = payload
 
     def capture_state(self) -> dict[str, object]:
         return deepcopy(
             {
                 "orders": self._orders,
+                "order_count": self._order_count,
                 "open_order_ids": self._open_order_ids,
                 "day_order_ids": self._day_order_ids,
                 "immediate_order_ids": self._immediate_order_ids,
@@ -84,6 +172,7 @@ class DeterministicBroker:
     def restore_state(self, state: dict[str, object]) -> None:
         restored = deepcopy(state)
         self._orders = restored["orders"]
+        self._order_count = restored["order_count"]
         self._open_order_ids = restored["open_order_ids"]
         self._day_order_ids = restored["day_order_ids"]
         self._immediate_order_ids = restored["immediate_order_ids"]
@@ -95,7 +184,15 @@ class DeterministicBroker:
 
     @property
     def orders(self) -> tuple[Order, ...]:
-        return tuple(sorted(self._orders.values(), key=self._sort_key))
+        orders = (
+            _order_from_bytes(value) if isinstance(value, bytes) else value
+            for value in self._orders.values()
+        )
+        return tuple(sorted(orders, key=self._sort_key))
+
+    @property
+    def order_count(self) -> int:
+        return self._order_count
 
     @property
     def order_events(self) -> tuple[OrderEvent, ...]:
@@ -107,10 +204,13 @@ class DeterministicBroker:
             return ()
         if len(self._open_order_ids) == 1:
             order_id = next(iter(self._open_order_ids))
-            return (self._orders[order_id],)
+            value = self._orders[order_id]
+            if isinstance(value, bytes):
+                raise RuntimeError("terminal order appeared in the open-order index")
+            return (value,)
         return tuple(
             sorted(
-                (self._orders[order_id] for order_id in self._open_order_ids),
+                (self._live_order(order_id) for order_id in self._open_order_ids),
                 key=self._sort_key,
             )
         )
@@ -121,7 +221,7 @@ class DeterministicBroker:
             return ()
         return tuple(
             sorted(
-                (self._orders[order_id] for order_id in self._immediate_order_ids),
+                (self._live_order(order_id) for order_id in self._immediate_order_ids),
                 key=self._sort_key,
             )
         )
@@ -147,7 +247,7 @@ class DeterministicBroker:
             order_id, prior_hash = prior
             if prior_hash != semantic_hash:
                 raise ValidationError("submit idempotency key reused with different intent")
-            return self._orders[order_id]
+            return self._require_order(order_id)
         order_id = _digest("ord", order_intent.idempotency_key, semantic_hash)
         filled = FixedPoint(0, order_intent.quantity.scale)
         accepted = self._order_fact(
@@ -164,11 +264,12 @@ class DeterministicBroker:
             fill_quantity=None,
         )
         self._orders[order_id] = accepted
+        self._order_count += 1
         self._open_order_ids.add(order_id)
         if order_intent.time_in_force in {TimeInForce.IOC, TimeInForce.FOK}:
             self._immediate_order_ids.add(order_id)
         self._submit_keys[order_intent.idempotency_key] = (order_id, semantic_hash)
-        self._events.append(event)
+        self._record_event(event, accepted)
         return accepted
 
     def reject(self, order_intent: OrderIntent, *, code: str, message: str = "") -> Order:
@@ -180,7 +281,7 @@ class DeterministicBroker:
             order_id, prior_hash = prior
             if prior_hash != semantic_hash:
                 raise ValidationError("submit idempotency key reused with different intent")
-            return self._orders[order_id]
+            return self._require_order(order_id)
         order_id = _digest("ord", order_intent.idempotency_key, semantic_hash)
         order = Order(order_id=order_id, intent=order_intent)
         reason = code if not message else f"{code}: {message}"
@@ -192,8 +293,9 @@ class DeterministicBroker:
             reason=reason,
         )
         self._orders[order_id] = rejected
+        self._order_count += 1
         self._submit_keys[order_intent.idempotency_key] = (order_id, semantic_hash)
-        self._events.append(event)
+        self._record_event(event, rejected)
         return rejected
 
     def cancel(
@@ -226,12 +328,16 @@ class DeterministicBroker:
         self._day_order_ids.discard(order_id)
         self._immediate_order_ids.discard(order_id)
         self._cancel_keys[idempotency_key] = (order_id, event)
-        self._events.append(event)
+        self._record_event(event, updated)
         return event
 
-    def apply_fill(self, fill: Fill) -> OrderEvent:
-        prior = self._fill_keys.get(fill.fill_id)
+    def apply_fill(self, fill: Fill, *, trusted_unique: bool = False) -> OrderEvent:
+        prior = None if trusted_unique else self._fill_keys.get(fill.fill_id)
         if prior is not None:
+            if isinstance(prior[0], bytes):
+                if prior[0] != hashlib.sha256(fill_bytes(fill)).digest():
+                    raise ValidationError("fill_id reused with different fill content")
+                return _event_from_bytes(prior[1])
             prior_fill, prior_event = prior
             if prior_fill != fill:
                 raise ValidationError("fill_id reused with different fill content")
@@ -283,8 +389,15 @@ class DeterministicBroker:
             self._open_order_ids.remove(order.order_id)
             self._day_order_ids.discard(order.order_id)
             self._immediate_order_ids.discard(order.order_id)
-        self._events.append(event)
-        self._fill_keys[fill.fill_id] = (fill, event)
+        self._record_event(event, updated)
+        if not trusted_unique:
+            if self._artifact_sink is None:
+                self._fill_keys[fill.fill_id] = (fill, event)
+            else:
+                self._fill_keys[fill.fill_id] = (
+                    hashlib.sha256(fill_bytes(fill)).digest(),
+                    order_event_bytes(event),
+                )
         return event
 
     def expire(self, order_id: str, *, event_time: datetime, reason: str) -> OrderEvent:
@@ -302,7 +415,7 @@ class DeterministicBroker:
         self._open_order_ids.remove(order_id)
         self._day_order_ids.discard(order_id)
         self._immediate_order_ids.discard(order_id)
-        self._events.append(event)
+        self._record_event(event, updated)
         return event
 
     def note_trading_day(self, order_id: str, trading_day: date) -> None:
@@ -337,9 +450,16 @@ class DeterministicBroker:
 
     def _require_order(self, order_id: str) -> Order:
         try:
-            return self._orders[order_id]
+            value = self._orders[order_id]
         except KeyError as exc:
             raise ValidationError(f"unknown order_id: {order_id}") from exc
+        return _order_from_bytes(value) if isinstance(value, bytes) else value
+
+    def _live_order(self, order_id: str) -> Order:
+        value = self._orders[order_id]
+        if isinstance(value, bytes):
+            raise TypeError("terminal order appeared in a live-order index")
+        return value
 
     @staticmethod
     def _order_fact(

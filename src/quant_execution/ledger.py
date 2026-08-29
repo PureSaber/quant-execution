@@ -24,11 +24,18 @@ from quant_data_kit import (
     StatusEvent,
     TradeEvent,
     ensure_utc_datetime,
+    market_event_payload,
 )
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution._fixed import decimal, fixed
 from quant_execution._json import fixed_token, flat_sequence_bytes, string_token, utc_token
+from quant_execution.artifacts import (
+    fee_bytes,
+    fill_bytes,
+    ledger_transaction_bytes,
+    settlement_bytes,
+)
 from quant_execution.contracts import (
     AccountSnapshot,
     Fee,
@@ -44,6 +51,7 @@ from quant_execution.contracts import (
     Side,
     _currency,
 )
+from quant_execution.schemas import execution_payload
 
 UTC = timezone.utc
 _OPENED_AT = datetime(1970, 1, 1, tzinfo=UTC)
@@ -121,8 +129,10 @@ class ExactAccountLedger:
             else self._default_opened_at
         )
         self._transactions: list[LedgerTransaction] = []
+        self._transaction_count = 0
+        self._artifact_sink = None
         self._transaction_keys: set[str] = set()
-        self._event_fingerprints: dict[str, LedgerEvent] = {}
+        self._event_fingerprints: dict[str, LedgerEvent | bytes] = {}
         self._fills: dict[str, Fill] = {}
         self._accounts: dict[tuple[str, str, str | None], Decimal] = {}
         self._positions: dict[str, Decimal] = {}
@@ -157,10 +167,30 @@ class ExactAccountLedger:
             )
             self._post(transaction)
 
+    def start_artifact_stream(self, sink: object) -> None:
+        """Move journal retention to a bounded artifact sink after reset."""
+
+        if self._artifact_sink is not None:
+            raise ValidationError("ledger artifact stream is already active")
+        if not callable(getattr(sink, "append", None)):
+            raise ValidationError("artifact sink must provide append(stream, payload)")
+        self._artifact_sink = sink
+        for transaction in self._transactions:
+            sink.append("ledger_transactions", ledger_transaction_bytes(transaction))
+        self._transaction_count = len(self._transactions)
+        self._transactions.clear()
+
+    def finish_artifact_stream(self) -> None:
+        self._artifact_sink = None
+
+    def abort_artifact_stream(self) -> None:
+        self._artifact_sink = None
+
     def capture_state(self) -> dict[str, object]:
         return deepcopy(
             {
                 "transactions": self._transactions,
+                "transaction_count": self._transaction_count,
                 "transaction_keys": self._transaction_keys,
                 "event_fingerprints": self._event_fingerprints,
                 "fills": self._fills,
@@ -181,6 +211,7 @@ class ExactAccountLedger:
     def restore_state(self, state: dict[str, object]) -> None:
         restored = deepcopy(state)
         self._transactions = restored["transactions"]
+        self._transaction_count = restored["transaction_count"]
         self._transaction_keys = restored["transaction_keys"]
         self._event_fingerprints = restored["event_fingerprints"]
         self._fills = restored["fills"]
@@ -199,6 +230,12 @@ class ExactAccountLedger:
     @property
     def transactions(self) -> tuple[LedgerTransaction, ...]:
         return tuple(self._transactions)
+
+    @property
+    def transaction_count(self) -> int:
+        return (
+            self._transaction_count if self._artifact_sink is not None else len(self._transactions)
+        )
 
     @property
     def journal_sha256(self) -> str:
@@ -572,12 +609,16 @@ class ExactAccountLedger:
         trading_day: date | None,
         create_snapshot: bool,
         local_rollback: bool = True,
+        trusted_unique: bool = False,
     ) -> AccountSnapshot | None:
         self._validate_event(event)
         reference_id = self._event_identity(event)
-        prior = self._event_fingerprints.get(reference_id)
+        prior = None if trusted_unique else self._event_fingerprints.get(reference_id)
         if prior is not None:
-            if prior != event:
+            if isinstance(prior, bytes):
+                if prior != self._event_fingerprint(event):
+                    raise ValidationError("ledger event id reused with different content")
+            elif prior != event:
                 raise ValidationError("ledger event id reused with different content")
             if isinstance(event, Fill) and self._fill_trading_days[event.fill_id] != trading_day:
                 raise ValidationError("fill trading_day changed across idempotent application")
@@ -623,8 +664,17 @@ class ExactAccountLedger:
                 )
             elif isinstance(event, CorporateActionEvent) and event.ratio is not None:
                 self._apply_split_state(event)
-            self._event_fingerprints[reference_id] = event
+            if not trusted_unique:
+                self._event_fingerprints[reference_id] = (
+                    self._event_fingerprint(event) if self._artifact_sink is not None else event
+                )
             self._event_time = transaction.event_time
+            if isinstance(event, Fee) and self._artifact_sink is not None:
+                fill = self._fills.pop(event.fill_id, None)
+                if fill is not None:
+                    spec = self._spec(fill.instrument_id)
+                    if spec.asset_class is not AssetClass.FUTURE:
+                        self._fill_close_allocations.pop(event.fill_id, None)
             return self.snapshot(transaction.event_time) if create_snapshot else None
         except Exception:
             if transaction is not None and undo is not None:
@@ -769,6 +819,7 @@ class ExactAccountLedger:
             trading_day=trading_day,
             create_snapshot=False,
             local_rollback=False,
+            trusted_unique=True,
         )
 
     def _validate_event(self, event: LedgerEvent) -> None:
@@ -1327,12 +1378,19 @@ class ExactAccountLedger:
         prior = self._posting_cache.get(key)
         if prior is not None:
             return prior
-        posting = Posting(
-            ledger_account=account,
-            currency=currency,
-            amount=fixed(amount, self.money_scale, rounding=ROUND_HALF_EVEN),
-            instrument_id=instrument_id,
-            quantity_delta=(
+        posting = object.__new__(Posting)
+        object.__setattr__(posting, "ledger_account", account)
+        object.__setattr__(posting, "currency", currency)
+        object.__setattr__(
+            posting,
+            "amount",
+            fixed(amount, self.money_scale, rounding=ROUND_HALF_EVEN),
+        )
+        object.__setattr__(posting, "instrument_id", instrument_id)
+        object.__setattr__(
+            posting,
+            "quantity_delta",
+            (
                 fixed(quantity_delta, quantity_scale, rounding=ROUND_HALF_EVEN)
                 if quantity_delta is not None
                 else None
@@ -1350,17 +1408,22 @@ class ExactAccountLedger:
         event_time: datetime,
         postings: tuple[Posting, ...],
     ) -> LedgerTransaction:
-        return LedgerTransaction(
-            transaction_id=_identifier("tx", self.account_id, event_type.value, reference_id),
-            idempotency_key=idempotency_key,
-            event_time=event_time,
-            event_type=event_type,
-            reference_id=reference_id,
-            postings=postings,
+        transaction = object.__new__(LedgerTransaction)
+        object.__setattr__(
+            transaction,
+            "transaction_id",
+            _identifier("tx", self.account_id, event_type.value, reference_id),
         )
+        object.__setattr__(transaction, "idempotency_key", idempotency_key)
+        object.__setattr__(transaction, "event_time", event_time)
+        object.__setattr__(transaction, "event_type", event_type)
+        object.__setattr__(transaction, "reference_id", reference_id)
+        object.__setattr__(transaction, "postings", postings)
+        return transaction
 
     def _post(self, transaction: LedgerTransaction, *, local_rollback: bool = True) -> None:
-        if transaction.idempotency_key in self._transaction_keys:
+        streaming = self._artifact_sink is not None
+        if not streaming and transaction.idempotency_key in self._transaction_keys:
             raise ValidationError("duplicate ledger transaction idempotency key")
         if not local_rollback:
             for posting in transaction.postings:
@@ -1375,8 +1438,15 @@ class ExactAccountLedger:
                     self._positions[instrument_id] = self._positions.get(
                         instrument_id, Decimal(0)
                     ) + decimal(posting.quantity_delta)
-            self._transactions.append(transaction)
-            self._transaction_keys.add(transaction.idempotency_key)
+            if self._artifact_sink is None:
+                self._transactions.append(transaction)
+            else:
+                self._artifact_sink.append(
+                    "ledger_transactions", ledger_transaction_bytes(transaction)
+                )
+                self._transaction_count += 1
+            if not streaming:
+                self._transaction_keys.add(transaction.idempotency_key)
             return
         missing = object()
         prior_accounts: dict[tuple[str, str, str | None], Decimal | object] = {}
@@ -1398,8 +1468,15 @@ class ExactAccountLedger:
                     self._positions[instrument_id] = self._positions.get(
                         instrument_id, Decimal(0)
                     ) + decimal(posting.quantity_delta)
-            self._transactions.append(transaction)
-            self._transaction_keys.add(transaction.idempotency_key)
+            if self._artifact_sink is None:
+                self._transactions.append(transaction)
+            else:
+                self._artifact_sink.append(
+                    "ledger_transactions", ledger_transaction_bytes(transaction)
+                )
+                self._transaction_count += 1
+            if not streaming:
+                self._transaction_keys.add(transaction.idempotency_key)
         except Exception:
             for key, value in prior_accounts.items():
                 if value is missing:
@@ -1428,6 +1505,20 @@ class ExactAccountLedger:
         if identity_field is None:
             raise ValidationError("ledger event has no stable identity")
         return f"{identity_field}:{getattr(event, identity_field)}"
+
+    @staticmethod
+    def _event_fingerprint(event: LedgerEvent) -> bytes:
+        if isinstance(event, Fill):
+            payload = fill_bytes(event)
+        elif isinstance(event, Fee):
+            payload = fee_bytes(event)
+        elif isinstance(event, Settlement):
+            payload = settlement_bytes(event)
+        elif isinstance(event, CorporateActionEvent):
+            payload = _canonical(market_event_payload(event))
+        else:
+            payload = _canonical(execution_payload(event))
+        return hashlib.sha256(payload).digest()
 
     def _spec(self, instrument_id: str) -> InstrumentSpec:
         try:
