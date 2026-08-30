@@ -49,7 +49,7 @@ def test_matching_worker_contract_uses_explicit_five_percent_fill_density(tmp_pa
     assert result["artifact_cleanup"] == "none"
     assert result["artifact_files_removed"] == 0
     assert result["strict_verification_passed"] is True
-    assert result["dependencies"]["quant_data_kit"] == "0.6.1"
+    assert result["dependencies"]["quant_data_kit"] == "0.7.4"
     assert Path(result["artifact_path"]).is_dir()
     assert result["artifact_manifest_sha256"]
     assert result["artifact_file_sha256"]
