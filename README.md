@@ -40,8 +40,9 @@ editable-build requirements for Python3.10-3.12. Every registry package is fixed
 version. The `dev` extra names Python3.10's conditional compatibility dependencies explicitly so
 a lock compiled on Python3.12 remains complete for the whole matrix. The internal package is also
 fixed by its released annotated tag:
-`quant-data-kit@v0.6.1`, from `https://github.com/PureSaber/quant-data-kit.git`, resolving to
-commit `edf1351690dc60691cc6330390adcdbf8bc79c5f`.
+`quant-data-kit@v0.7.4`, from `https://github.com/PureSaber/quant-data-kit.git`, resolving to
+commit `ecb04bd5834aeefdf79226c15cba484337785f90` through annotated tag object
+`49976e938c0b00c0a083b0c4175cc6a879a3f988`.
 
 Regenerate the lock only after reviewing dependency changes in `pyproject.toml`:
 

@@ -22,12 +22,16 @@ jsonschema==4.26.0
     # via
     #   quant-data-kit
     #   quant-execution (pyproject.toml)
+jsonschema-rs==0.52.1
+    # via quant-data-kit
 jsonschema-specifications==2025.9.1
     # via jsonschema
 numpy==2.2.6
     # via
     #   pandas
     #   quant-data-kit
+orjson==3.12.0
+    # via quant-data-kit
 packaging==26.3
     # via pytest
 pandas==2.3.3
@@ -54,7 +58,7 @@ pytz==2026.3.post1
     # via pandas
 pyyaml==6.0.3
     # via quant-data-kit
-quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.6.1
+quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.7.4
     # via quant-execution (pyproject.toml)
 referencing==0.37.0
     # via
@@ -78,6 +82,8 @@ typing-extensions==4.16.0
     #   referencing
 tzdata==2026.3
     # via pandas
+websockets==15.0.1
+    # via quant-data-kit
 
 # The following packages are considered to be unsafe in a requirements file:
 setuptools==84.0.0
