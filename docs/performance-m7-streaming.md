@@ -4,7 +4,7 @@
 
 The candidate adds an artifact-retention-bounded Arrow path without replacing the frozen
 Python reference path. Correctness, compatibility and coverage gates pass. From clean commit
-`36c130bef9829fcc6506941478d66f58f2ff73a0`, all three independent10-million-event processes pass
+`37260badebb1c637e7247d21dc0694e723f5d206`, all three independent10-million-event processes pass
 the50,000-events/second and16GiB gates; no calibration result is promoted to release evidence.
 
 ## Architecture and compatibility
@@ -24,6 +24,8 @@ the50,000-events/second and16GiB gates; no calibration result is promoted to rel
 - `StoredRunArtifacts` exposes lazy byte and JSON iterators; no consumer is forced to reconstruct
   the complete Python object graph;
 - incomplete runs retain `FAILED.json`; only a sealed and closed run receives a complete manifest;
+- finalized or aborted broker and ledger streams reject every subsequent mutation until an
+  explicit reset, so live state cannot diverge from sealed artifacts or finalized journal hashes;
 - manifest publication is atomic and no-clobber, and strict reload verifies canonical manifest
   bytes, manifest hash, physical file size/hash, Arrow schema, contiguous sequence and logical hash.
 
@@ -75,19 +77,19 @@ output-volume, strict-verification and per-process fields live in the committed 
 
 | Run | Events/s | Peak working set | Strict reload |
 |---:|---:|---:|---|
-| 1 | 62,920.17 | 2,242.47MiB | PASS |
-| 2 | 64,106.74 | 2,233.68MiB | PASS |
-| 3 | 61,356.14 | 2,240.03MiB | PASS |
+| 1 | 64,746.49 | 2,239.19MiB | PASS |
+| 2 | 62,394.71 | 2,242.02MiB | PASS |
+| 3 | 64,627.91 | 2,236.11MiB | PASS |
 
 Each run processed10,000,000 events,500,000 fills and1,000,001 exact ledger transactions. All
 logical hashes, physical Arrow hashes and the manifest hash were identical across fresh processes.
 The three retained artifact directories contain1,501,955,792 bytes each. The machine-readable
 evidence is `validation/performance/m7-execution-final-10m.json`; its SHA-256 is
-`3bf5f9f18adfcf38489cf0d20d62ee8b561d2f4fc647bbe87bf21f92bab6a90f`.
+`6c74790bb3b9d5a20b95ba07989feb0eb6a265a211970577c6092559aaf47cb2`.
 
 The Arrow buffers and writer queue are bounded, but replay identity sets and broker order/index
 state still scale with event or order count. The claim is therefore controlled memory at the
-certified10-million-event envelope (maximum2,242.47MiB), not strict input-independent O(1) memory.
+certified10-million-event envelope (maximum2,242.02MiB), not strict input-independent O(1) memory.
 
 ## Dense-stress limitation
 
