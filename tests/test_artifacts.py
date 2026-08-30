@@ -5,8 +5,8 @@ import queue
 from datetime import date, timedelta
 
 import pytest
-from conftest import T0, fp
-from quant_data_kit import CorporateActionEvent, FundingRateEvent, StatusEvent
+from conftest import T0, event_fields, fp
+from quant_data_kit import CorporateActionEvent, FundingRateEvent, MarkPriceEvent, StatusEvent
 from quant_data_kit.exceptions import ValidationError
 from test_engine import (
     FixtureStrategy,
@@ -199,6 +199,16 @@ def test_streaming_broker_fill_compaction_and_lifecycle_guards(tmp_path) -> None
         broker._live_order(order.order_id)
     broker._open_order_ids.clear()
     broker.finish_artifact_stream()
+    with pytest.raises(ValidationError, match="stream is closed"):
+        broker.submit(intent)
+    with pytest.raises(ValidationError, match="stream is closed"):
+        broker.apply_fill(fill)
+    with pytest.raises(ValidationError, match="stream is closed"):
+        broker.note_trading_day(order.order_id, T0.date())
+    with pytest.raises(ValidationError, match="stream is closed"):
+        broker.expire_day_orders(T0.date(), T0 + timedelta(days=1))
+    with pytest.raises(ValidationError, match="stream is closed"):
+        broker.start_artifact_stream(sink)
     broker.finish_artifact_stream()
     sink.close({"run_id": "broker-fill"})
 
@@ -711,7 +721,67 @@ def test_streaming_ledger_compact_idempotency_and_stream_guards(tmp_path) -> Non
     assert journal_sha256 == ledger.journal_sha256
     assert ledger.transaction_count == 2
     assert ledger.finish_artifact_stream() == journal_sha256
+    sealed_snapshot = ledger.snapshot()
+    with pytest.raises(ValidationError, match="stream is closed"):
+        ledger.apply_with_trading_day(fill, trading_day=T0.date(), create_snapshot=False)
+    with pytest.raises(ValidationError, match="stream is closed"):
+        ledger.mark(
+            MarkPriceEvent(
+                **event_fields("sealed-mark", spot.instrument_id, seconds=1),
+                price=fp("101"),
+            )
+        )
+    with pytest.raises(ValidationError, match="stream is closed"):
+        ledger.set_fx_rate("USD", fp("1"), event_time=T0 + timedelta(seconds=1))
+    with pytest.raises(ValidationError, match="stream is closed"):
+        ledger.start_artifact_stream(sink)
+    assert ledger.snapshot() == sealed_snapshot
+    assert ledger.transaction_count == 2
+    assert ledger.journal_sha256 == journal_sha256
     sink.close({"run_id": "ledger-compact"})
+
+
+def test_aborted_artifact_components_require_reset_before_reuse(tmp_path) -> None:
+    intent = OrderIntent(
+        idempotency_key="after-abort",
+        account_id="account",
+        strategy_id="strategy",
+        instrument_id=SPOT,
+        side=Side.BUY,
+        quantity=fp("1.000", 3),
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        created_at=T0,
+        limit_price=fp("100"),
+    )
+    broker = DeterministicBroker()
+    broker_sink = ArrowReplayArtifactSink(tmp_path / "aborted-broker", batch_size=1)
+    broker.start_artifact_stream(broker_sink)
+    broker.abort_artifact_stream()
+    with pytest.raises(ValidationError, match="stream is closed"):
+        broker.submit(intent)
+    broker.reset()
+    assert broker.submit(intent).intent == intent
+    broker_sink.abort()
+
+    spot = specs()[SPOT]
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="USDT",
+        instruments={spot.instrument_id: spot},
+        initial_cash={"USDT": fp("1000")},
+    )
+    ledger_sink = ArrowReplayArtifactSink(tmp_path / "aborted-ledger", batch_size=1)
+    ledger.start_artifact_stream(ledger_sink)
+    ledger.abort_artifact_stream()
+    assert ledger.transaction_count == 1
+    with pytest.raises(ValidationError, match="unavailable after artifact abort"):
+        _ = ledger.journal_sha256
+    with pytest.raises(ValidationError, match="stream is closed"):
+        ledger.set_fx_rate("USD", fp("1"), event_time=T0)
+    ledger.reset()
+    ledger.set_fx_rate("USD", fp("1"), event_time=T0)
+    ledger_sink.abort()
 
 
 def test_streaming_corporate_funding_settlement_and_custom_gate_paths(tmp_path) -> None:

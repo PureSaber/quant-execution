@@ -119,10 +119,12 @@ class DeterministicBroker:
         self._events: list[OrderEvent] = []
         self._accepted_day: dict[str, date] = {}
         self._artifact_sink = None
+        self._artifact_stream_closed = False
 
     def start_artifact_stream(self, sink: object) -> None:
         """Route immutable history to a bounded sink while retaining lookup/idempotency state."""
 
+        self._require_mutable()
         if self._orders or self._events or self._artifact_sink is not None:
             raise ValidationError("broker artifact streaming must start immediately after reset")
         if not callable(getattr(sink, "append", None)):
@@ -138,9 +140,16 @@ class DeterministicBroker:
         for order in self.open_orders:
             sink.append("orders", order_bytes(order))
         self._artifact_sink = None
+        self._artifact_stream_closed = True
 
     def abort_artifact_stream(self) -> None:
-        self._artifact_sink = None
+        if self._artifact_sink is not None:
+            self._artifact_sink = None
+            self._artifact_stream_closed = True
+
+    def _require_mutable(self) -> None:
+        if self._artifact_stream_closed:
+            raise ValidationError("broker artifact stream is closed; reset is required")
 
     def _record_event(self, event: OrderEvent, order: Order) -> None:
         sink = self._artifact_sink
@@ -166,6 +175,7 @@ class DeterministicBroker:
                 "fill_keys": self._fill_keys,
                 "events": self._events,
                 "accepted_day": self._accepted_day,
+                "artifact_stream_closed": self._artifact_stream_closed,
             }
         )
 
@@ -181,6 +191,7 @@ class DeterministicBroker:
         self._fill_keys = restored["fill_keys"]
         self._events = restored["events"]
         self._accepted_day = restored["accepted_day"]
+        self._artifact_stream_closed = restored["artifact_stream_closed"]
 
     @property
     def orders(self) -> tuple[Order, ...]:
@@ -239,6 +250,7 @@ class DeterministicBroker:
         return hashlib.sha256(_intent_bytes(intent)).hexdigest()
 
     def submit(self, order_intent: OrderIntent) -> Order:
+        self._require_mutable()
         if not isinstance(order_intent, OrderIntent):
             raise ValidationError("order_intent must be an OrderIntent")
         semantic_hash = self._intent_hash(order_intent)
@@ -273,6 +285,7 @@ class DeterministicBroker:
         return accepted
 
     def reject(self, order_intent: OrderIntent, *, code: str, message: str = "") -> Order:
+        self._require_mutable()
         if not code.strip():
             raise ValidationError("rejection code is required")
         semantic_hash = self._intent_hash(order_intent)
@@ -305,6 +318,7 @@ class DeterministicBroker:
         idempotency_key: str,
         created_at: datetime,
     ) -> OrderEvent:
+        self._require_mutable()
         if not idempotency_key.strip():
             raise ValidationError("cancel idempotency_key is required")
         prior = self._cancel_keys.get(idempotency_key)
@@ -332,6 +346,7 @@ class DeterministicBroker:
         return event
 
     def apply_fill(self, fill: Fill, *, trusted_unique: bool = False) -> OrderEvent:
+        self._require_mutable()
         prior = None if trusted_unique else self._fill_keys.get(fill.fill_id)
         if prior is not None:
             if isinstance(prior[0], bytes):
@@ -401,6 +416,7 @@ class DeterministicBroker:
         return event
 
     def expire(self, order_id: str, *, event_time: datetime, reason: str) -> OrderEvent:
+        self._require_mutable()
         order = self._require_order(order_id)
         if order.status not in {OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED}:
             raise ValidationError("only open orders can expire")
@@ -419,12 +435,14 @@ class DeterministicBroker:
         return event
 
     def note_trading_day(self, order_id: str, trading_day: date) -> None:
+        self._require_mutable()
         order = self._orders.get(order_id)
         if order is not None and order.intent.time_in_force is TimeInForce.DAY:
             self._accepted_day.setdefault(order_id, trading_day)
             self._day_order_ids.add(order_id)
 
     def expire_day_orders(self, trading_day: date, event_time: datetime) -> tuple[OrderEvent, ...]:
+        self._require_mutable()
         if not self._day_order_ids:
             return ()
         expired: list[OrderEvent] = []
