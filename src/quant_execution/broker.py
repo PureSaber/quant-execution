@@ -180,6 +180,12 @@ class DeterministicBroker:
         )
 
     def restore_state(self, state: dict[str, object]) -> None:
+        """Restore a mutable checkpoint; sealed lifecycle recovery is engine-internal."""
+
+        self._require_mutable()
+        self._restore_captured_state(state)
+
+    def _restore_captured_state(self, state: dict[str, object]) -> None:
         restored = deepcopy(state)
         self._orders = restored["orders"]
         self._order_count = restored["order_count"]

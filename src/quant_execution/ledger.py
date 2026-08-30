@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
 from functools import lru_cache
+from types import MappingProxyType
 
 from quant_data_kit import (
     AssetClass,
@@ -104,15 +105,15 @@ class ExactAccountLedger:
             raise ValidationError("account_id and base_currency are required")
         if not 0 <= money_scale <= 18:
             raise ValidationError("money_scale must be in [0, 18]")
-        self.account_id = account_id
-        self.base_currency = _currency(base_currency, "base_currency")
-        self.instruments = dict(instruments)
+        self._account_id = account_id
+        self._base_currency = _currency(base_currency, "base_currency")
+        self._instruments = MappingProxyType(dict(instruments))
         self._derivative_instruments = frozenset(
             instrument_id
-            for instrument_id, spec in self.instruments.items()
+            for instrument_id, spec in self._instruments.items()
             if self._is_derivative(spec)
         )
-        self.money_scale = money_scale
+        self._money_scale = money_scale
         self._initial_cash = dict(initial_cash or {})
         self._initial_fx = dict(fx_to_base or {})
         self._default_opened_at = (
@@ -236,6 +237,12 @@ class ExactAccountLedger:
         )
 
     def restore_state(self, state: dict[str, object]) -> None:
+        """Restore a mutable checkpoint; sealed lifecycle recovery is engine-internal."""
+
+        self._require_mutable()
+        self._restore_captured_state(state)
+
+    def _restore_captured_state(self, state: dict[str, object]) -> None:
         restored = deepcopy(state)
         self._transactions = restored["transactions"]
         self._transaction_count = restored["transaction_count"]
@@ -259,6 +266,22 @@ class ExactAccountLedger:
     @property
     def transactions(self) -> tuple[LedgerTransaction, ...]:
         return tuple(self._transactions)
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def base_currency(self) -> str:
+        return self._base_currency
+
+    @property
+    def money_scale(self) -> int:
+        return self._money_scale
+
+    @property
+    def instruments(self) -> Mapping[str, InstrumentSpec]:
+        return self._instruments
 
     @property
     def transaction_count(self) -> int:
@@ -388,7 +411,7 @@ class ExactAccountLedger:
 
     def risk_balances(
         self, event_time: datetime
-    ) -> tuple[dict[str, Decimal], dict[str, Decimal], Decimal, Decimal]:
+    ) -> tuple[dict[str, Decimal], Mapping[str, Decimal], Decimal, Decimal]:
         """Return exact decimal balances needed by the hot pre-trade risk path."""
         event_time = ensure_utc_datetime(event_time, field="event_time")
         cash = {
@@ -423,7 +446,7 @@ class ExactAccountLedger:
                     spec.settlement_currency,
                     event_time,
                 )
-        return cash, self._positions, nav, initial_margin
+        return cash, MappingProxyType(self._positions), nav, initial_margin
 
     def portfolio_risk_snapshot(self, event_time: datetime) -> PortfolioRiskSnapshot:
         """Build an exact, read-only base-currency exposure view at one PIT timestamp."""

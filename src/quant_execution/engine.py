@@ -770,6 +770,10 @@ class DeterministicRunEngine:
     def _restore_component(component: object, checkpoint: tuple[str, object]) -> None:
         mode, state = checkpoint
         if mode == "explicit":
+            trusted_restore = getattr(component, "_restore_captured_state", None)
+            if callable(trusted_restore):
+                trusted_restore(state)
+                return
             restore = getattr(component, "restore_state", None)
             if not callable(restore):
                 raise ValidationError(f"component {type(component).__name__} lost restore_state")
