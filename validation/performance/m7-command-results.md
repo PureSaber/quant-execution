@@ -14,7 +14,8 @@ logical and physical hashes, retain its artifacts and pass strict post-run reloa
 ## Modified files
 
 - Runtime:`src/quant_execution/artifacts.py`, `broker.py`, `engine.py`, `ledger.py`, `__init__.py`.
-- Contract/version:`pyproject.toml` (`0.5.0` and replay-artifact manifest schema`1.0.0`).
+- Contract/version:`pyproject.toml` (`0.5.0`, replay-artifact manifest schema`1.0.0` and
+  `quant-data-kit@v0.7.4`) plus the regenerated `requirements.lock`.
 - Tests/CI:`tests/test_artifacts.py`, `tests/test_benchmark_replay.py`, `.github/workflows/ci.yml`.
 - Benchmark/docs:`benchmarks/benchmark_replay.py`, `README.md`,
   `docs/performance-m7-streaming.md`, this handoff and the final JSON report.
@@ -56,15 +57,13 @@ python tools/check_branch_coverage.py coverage.json --threshold 90 \
 
 ## Formal performance evidence
 
-Source commit:`99eac282b1d31e33828a2d18e0efa42f983ef049`.
+Source commit:`36c130bef9829fcc6506941478d66f58f2ff73a0`.
 
 ```text
-TEMP=F:\puresaber-m7-temp
-TMP=F:\puresaber-m7-temp
 python benchmarks/benchmark_replay.py --workload matching \
   --matching-events 10000000 --repeat 3 --require-rate 50000 \
   --memory-limit-gib 16 --artifact-mode arrow \
-  --artifact-root F:\puresaber-m7-artifacts\execution-final2-10m-99eac28 \
+  --artifact-root F:\puresaber-m7-artifacts\execution-v0.5.0-qdk-v0.7.4-36c130b \
   --artifact-retention keep --artifact-batch-size 8192 \
   --artifact-queue-batches 2 \
   --output validation\performance\m7-execution-final-10m.json
@@ -72,27 +71,28 @@ python benchmarks/benchmark_replay.py --workload matching \
 
 | Run | Events/s | Peak working set | Strict reload | Dirty tree |
 |---:|---:|---:|---|---|
-| 1 | 59,340.69 | 2,233.67MiB | PASS | false |
-| 2 | 62,627.03 | 2,234.61MiB | PASS | false |
-| 3 | 52,966.75 | 2,236.26MiB | PASS | false |
+| 1 | 62,920.17 | 2,242.47MiB | PASS | false |
+| 2 | 64,106.74 | 2,233.68MiB | PASS | false |
+| 3 | 61,356.14 | 2,240.03MiB | PASS | false |
 
-- Rate gate:PASS for every run; median59,340.69 events/second.
-- Memory gate:PASS; maximum2,236.26MiB.
+- Rate gate:PASS for every run; median62,920.17 events/second.
+- Memory gate:PASS; maximum2,242.47MiB.
 - Each run:10,000,000 events,500,000 orders/fills,1,000,000 order events and
   1,000,001 balanced ledger transactions; explicit fill density5% (`order_stride=20`).
 - Determinism:all logical hashes, every Arrow physical file hash and the manifest hash match across
   all three fresh processes.
 - Artifact manifest SHA-256:`c87db59076f852248416df828ff43cbc7dc96cbf196547e97f6e70081c111f27`.
-- Final report SHA-256:`a26c9f0eefeb9b0150c9c1ed93b8163a57ec603c8349082847b3927755bec634`.
-- Dependencies:Python3.12.5, PyArrow25.0.1, quant-data-kit distribution0.6.1.
+- Final report SHA-256:`3bf5f9f18adfcf38489cf0d20d62ee8b561d2f4fc647bbe87bf21f92bab6a90f`.
+- Dependencies:Python3.12.5, PyArrow25.0.1, quant-data-kit distribution0.7.4.
 - Machine:Windows11,16 logical CPUs; process peak working set includes Arrow and live replay state.
 - Retained artifacts:three directories,1,501,955,792 bytes each (about4.20GiB total), under
-  `F:\puresaber-m7-artifacts\execution-final2-10m-99eac28`; no file was automatically removed.
+  `F:\puresaber-m7-artifacts\execution-v0.5.0-qdk-v0.7.4-36c130b`; no file was automatically
+  removed.
 
 The timed interval includes event materialization, matching, risk, fill, fee, exact ledger,
 canonical serialization, Arrow initialization/write/seal, logical hashes and manifest close.
 Process startup, one static fixture-template construction and strict post-run reload are excluded;
-strict reload is independently required and passed in3.18–3.32seconds per run.
+strict reload is independently required and passed in2.95–3.03seconds per run.
 
 ## Dense stress and remaining risks
 
@@ -110,7 +110,7 @@ Remaining risks:
 - physical Arrow hashes depend on the locked PyArrow serialization version and must be rebaselined,
   never silently accepted, after a dependency upgrade;
 - the dense50%-fill stress gate is still a known capacity limitation;
-- the slowest representative run passed by only5.9%, so future releases must retain the per-run
+- the slowest representative run passed by22.7%, so future releases must retain the per-run
   gate and15% regression comparison instead of relying on the median;
 - Arrow buffers are bounded, while event/fill identity sets and broker lookup/idempotency state
   still scale with input/order count; the certified claim is controlled memory at10M, not O(1);

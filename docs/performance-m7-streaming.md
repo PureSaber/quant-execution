@@ -4,7 +4,7 @@
 
 The candidate adds an artifact-retention-bounded Arrow path without replacing the frozen
 Python reference path. Correctness, compatibility and coverage gates pass. From clean commit
-`99eac282b1d31e33828a2d18e0efa42f983ef049`, all three independent10-million-event processes pass
+`36c130bef9829fcc6506941478d66f58f2ff73a0`, all three independent10-million-event processes pass
 the50,000-events/second and16GiB gates; no calibration result is promoted to release evidence.
 
 ## Architecture and compatibility
@@ -66,28 +66,28 @@ to pass and its duration is reported. Every repeat is a fresh process; the rate 
 process, not the median, to reach50,000 events/second. Peak memory is Windows process
 `PeakWorkingSetSize` and therefore includes Arrow and retained live replay state.
 
-The official run sets `TEMP` and `TMP` to `F:\puresaber-m7-temp` and writes to a unique directory
-under `F:\puresaber-m7-artifacts`. Every Arrow stream and canonical manifest is retained; the
-benchmark has no automatic deletion mode. Exact machine, dependency, commit, dirty-state, timing,
+The official run uses the recorded system temporary directory and writes to a unique directory under
+`F:\puresaber-m7-artifacts`. Every Arrow stream and canonical manifest is retained; the benchmark
+has no automatic deletion mode. Exact machine, dependency, commit, dirty-state, timing,
 output-volume, strict-verification and per-process fields live in the committed JSON evidence.
 
 ## Formal result
 
 | Run | Events/s | Peak working set | Strict reload |
 |---:|---:|---:|---|
-| 1 | 59,340.69 | 2,233.67MiB | PASS |
-| 2 | 62,627.03 | 2,234.61MiB | PASS |
-| 3 | 52,966.75 | 2,236.26MiB | PASS |
+| 1 | 62,920.17 | 2,242.47MiB | PASS |
+| 2 | 64,106.74 | 2,233.68MiB | PASS |
+| 3 | 61,356.14 | 2,240.03MiB | PASS |
 
 Each run processed10,000,000 events,500,000 fills and1,000,001 exact ledger transactions. All
 logical hashes, physical Arrow hashes and the manifest hash were identical across fresh processes.
 The three retained artifact directories contain1,501,955,792 bytes each. The machine-readable
 evidence is `validation/performance/m7-execution-final-10m.json`; its SHA-256 is
-`a26c9f0eefeb9b0150c9c1ed93b8163a57ec603c8349082847b3927755bec634`.
+`3bf5f9f18adfcf38489cf0d20d62ee8b561d2f4fc647bbe87bf21f92bab6a90f`.
 
 The Arrow buffers and writer queue are bounded, but replay identity sets and broker order/index
 state still scale with event or order count. The claim is therefore controlled memory at the
-certified10-million-event envelope (maximum2,236.26MiB), not strict input-independent O(1) memory.
+certified10-million-event envelope (maximum2,242.47MiB), not strict input-independent O(1) memory.
 
 ## Dense-stress limitation
 
