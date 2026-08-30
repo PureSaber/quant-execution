@@ -313,6 +313,27 @@ def test_engine_fail_closed_on_strategy_error_duplicate_event_and_future_intent(
         engine.replay([event, event], 1)
 
 
+def test_exact_ledger_replay_fast_path_restores_the_whole_run_on_post_failure(
+    monkeypatch,
+) -> None:
+    engine, events = scenario_a_share()
+    ledger_before = engine.ledger.capture_state()
+    broker_before = engine.broker.capture_state()
+    original_post = engine.ledger._post
+
+    def post_then_fail(transaction, *, local_rollback=True):
+        original_post(transaction, local_rollback=local_rollback)
+        if not local_rollback and transaction.event_type.value == "fill":
+            raise RuntimeError("injected replay post failure")
+
+    monkeypatch.setattr(engine.ledger, "_post", post_then_fail)
+    with pytest.raises(ReplayError, match="injected replay post failure"):
+        engine.replay(events, 42)
+
+    assert engine.ledger.capture_state() == ledger_before
+    assert engine.broker.capture_state() == broker_before
+
+
 def test_rejected_intent_creates_reasoned_order_event_without_position_mutation() -> None:
     registry = {STOCK: specs()[STOCK]}
     strategy = FixtureStrategy({"signal": [Signal(STOCK, Side.BUY, fp("100"), fp("10"))]})

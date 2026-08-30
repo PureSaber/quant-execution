@@ -6,7 +6,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 from typing import TypeAlias
@@ -437,12 +436,33 @@ class LedgerTransaction:
             or any(not isinstance(posting, Posting) for posting in self.postings)
         ):
             raise ValidationError("ledger transaction requires an immutable tuple of postings")
-        balances: dict[str, Decimal] = {}
-        for posting in self.postings:
-            balances[posting.currency] = (
-                balances.get(posting.currency, Decimal(0)) + posting.amount.to_decimal()
-            )
-        unbalanced = {currency: total for currency, total in balances.items() if total != 0}
+        first = self.postings[0]
+        same_scale_currency = all(
+            posting.currency == first.currency and posting.amount.scale == first.amount.scale
+            for posting in self.postings[1:]
+        )
+        if same_scale_currency:
+            balances = {
+                first.currency: (
+                    sum(posting.amount.units for posting in self.postings),
+                    first.amount.scale,
+                )
+            }
+        else:
+            balances: dict[str, tuple[int, int]] = {}
+            for posting in self.postings:
+                prior_units, prior_scale = balances.get(posting.currency, (0, posting.amount.scale))
+                scale = max(prior_scale, posting.amount.scale)
+                balances[posting.currency] = (
+                    prior_units * 10 ** (scale - prior_scale)
+                    + posting.amount.units * 10 ** (scale - posting.amount.scale),
+                    scale,
+                )
+        unbalanced = {
+            currency: {"units": units, "scale": scale}
+            for currency, (units, scale) in balances.items()
+            if units != 0
+        }
         if unbalanced:
             raise ValidationError(f"ledger transaction is unbalanced: {unbalanced}")
 

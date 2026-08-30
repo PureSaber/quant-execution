@@ -1,0 +1,68 @@
+[
+  {
+    "events": 10000,
+    "events_per_s_median": 202688.05,
+    "events_per_s_runs": [
+      166480.21,
+      202688.05,
+      235622.33
+    ],
+    "fill_density": 0.0,
+    "fill_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "fills": 0,
+    "independent_processes": 3,
+    "ledger_sha256": "9027723b240e6f01192567436867a65a2d5b11fd97eae62c46a8329af4ec36bd",
+    "memory_gate": true,
+    "order_events": 0,
+    "order_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "orders": 0,
+    "peak_working_set_mib": 127.15,
+    "peak_working_set_mib_runs": [
+      127.15,
+      126.81,
+      127.0
+    ],
+    "rate_gate": true,
+    "result_sha256": "26b178c93124241d1dfe25d5333829d5fa04a34e05822108f072e62af61b8357",
+    "transactions": 1,
+    "worker_pids": [
+      32400,
+      6348,
+      26268
+    ],
+    "workload": "release_no_orders"
+  },
+  {
+    "events": 2000,
+    "events_per_s_median": 11731.93,
+    "events_per_s_runs": [
+      12684.68,
+      11731.93,
+      10893.18
+    ],
+    "fill_density": 0.5,
+    "fill_sha256": "692b04a23993a8e2302ae36c262c2115e83c3d26f07fbe8b5b474f43b00705c9",
+    "fills": 1000,
+    "independent_processes": 3,
+    "ledger_sha256": "b78ea6ba6de6b2fe9bfc8dee21f7b516149fa8e94732cf93e7e9c5d4610f13b2",
+    "memory_gate": true,
+    "order_events": 2000,
+    "order_sha256": "b9c9595aab6e650f0e25706ba8813f1e043dfa38a804711981175ed00375feb2",
+    "orders": 1000,
+    "peak_working_set_mib": 130.24,
+    "peak_working_set_mib_runs": [
+      130.24,
+      129.92,
+      130.11
+    ],
+    "rate_gate": false,
+    "result_sha256": "1c43987b6c23db9f77dda68c0d872df51ebfd990eece4eca82ec44fdfccccc9f",
+    "transactions": 2001,
+    "worker_pids": [
+      4084,
+      28252,
+      13824
+    ],
+    "workload": "dense_matching_exact_ledger"
+  }
+]

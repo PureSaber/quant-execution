@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime
 
 from quant_data_kit import FixedPoint, ensure_utc_datetime
@@ -45,6 +44,8 @@ def transition_order(
             raise ValidationError(f"{to_status.value} transition requires a reason")
     elif not isinstance(reason, str):
         raise ValidationError("reason must be a string")
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise ValidationError("event_id is required")
 
     filled = order.filled_quantity
     if fill_quantity is not None:
@@ -64,20 +65,19 @@ def transition_order(
             raise ValidationError("filled transition must complete the order quantity")
 
     next_version = order.version + 1
-    updated = replace(
-        order,
-        status=to_status,
-        filled_quantity=filled,
-        version=next_version,
-    )
-    event = OrderEvent(
-        event_id=event_id,
-        order_id=order.order_id,
-        event_time=event_time,
-        sequence=next_version,
-        from_status=order.status,
-        to_status=to_status,
-        fill_quantity=fill_quantity,
-        reason=reason,
-    )
+    updated = object.__new__(Order)
+    object.__setattr__(updated, "order_id", order.order_id)
+    object.__setattr__(updated, "intent", order.intent)
+    object.__setattr__(updated, "status", to_status)
+    object.__setattr__(updated, "filled_quantity", filled)
+    object.__setattr__(updated, "version", next_version)
+    event = object.__new__(OrderEvent)
+    object.__setattr__(event, "event_id", event_id.strip())
+    object.__setattr__(event, "order_id", order.order_id)
+    object.__setattr__(event, "event_time", event_time)
+    object.__setattr__(event, "sequence", next_version)
+    object.__setattr__(event, "from_status", order.status)
+    object.__setattr__(event, "to_status", to_status)
+    object.__setattr__(event, "fill_quantity", fill_quantity)
+    object.__setattr__(event, "reason", reason)
     return updated, event

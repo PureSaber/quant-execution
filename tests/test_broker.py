@@ -130,6 +130,11 @@ def test_broker_fail_closed_validation_and_state_checkpoint_branches() -> None:
             broker.apply_fill(bad_fill)
         assert broker.get_order(second.order_id).status is OrderStatus.ACCEPTED
 
+    non_positive = fill(second.order_id, "non-positive", "1", 1)
+    object.__setattr__(non_positive, "quantity", fp("-1"))
+    with pytest.raises(ValidationError, match="positive"):
+        broker.apply_fill(non_positive)
+
     checkpoint = broker.capture_state()
     broker.expire(second.order_id, event_time=T0 + timedelta(seconds=2), reason="fixture")
     with pytest.raises(ValidationError, match="only open"):

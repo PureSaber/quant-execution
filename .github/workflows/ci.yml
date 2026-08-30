@@ -31,4 +31,4 @@ jobs:
       - name: Enforce core branch coverage
         run: >-
           python tools/check_branch_coverage.py coverage.json --threshold 90
-          broker contracts schemas engine matching state_machine ledger rules
+          artifacts broker contracts schemas engine matching state_machine ledger rules
