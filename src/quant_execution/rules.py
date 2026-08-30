@@ -20,6 +20,7 @@ from quant_data_kit import (
     QuoteEvent,
     StatusEvent,
     TradeEvent,
+    ensure_utc_datetime,
 )
 from quant_data_kit.exceptions import ValidationError
 
@@ -310,6 +311,8 @@ class RuleBookRiskGate:
         self.ledger = ledger
         self.money_scale = money_scale
         self.policies = tuple(policies)
+        self._rules: dict[str, _AssetRule] = {}
+        self._fee_rates: dict[tuple[str, Side, LiquidityRole], Decimal] = {}
         for policy in self.policies:
             if not callable(getattr(policy, "check_order", None)) or not callable(
                 getattr(policy, "runtime_check", None)
@@ -371,6 +374,23 @@ class RuleBookRiskGate:
             as_of=order_intent.created_at,
         )
 
+    def _check_current_for_submit(
+        self, order_intent: OrderIntent, *, event_time: datetime
+    ) -> tuple[
+        RiskDecision,
+        tuple[tuple[str, Decimal] | None, Decimal, tuple[str, Decimal] | None] | None,
+    ]:
+        """Return a checked reservation for the built-in engine submit path."""
+
+        prepared: list[tuple[tuple[str, Decimal] | None, Decimal, tuple[str, Decimal] | None]] = []
+        decision = self._check(
+            order_intent,
+            self._current_view(event_time, order_intent.instrument_id),
+            as_of=order_intent.created_at,
+            prepared_reservation=prepared,
+        )
+        return decision, prepared[0] if prepared else None
+
     def check_open_order(
         self,
         order: Order,
@@ -428,6 +448,10 @@ class RuleBookRiskGate:
         account_snapshot: AccountSnapshot | _RiskAccountView,
         *,
         as_of: datetime,
+        prepared_reservation: list[
+            tuple[tuple[str, Decimal] | None, Decimal, tuple[str, Decimal] | None]
+        ]
+        | None = None,
     ) -> RiskDecision:
         if order_intent.account_id != account_snapshot.account_id:
             return RiskDecision(False, "ACCOUNT_MISMATCH", "intent targets another account")
@@ -456,22 +480,43 @@ class RuleBookRiskGate:
             if value is not None and not aligned(value, spec.price_tick):
                 return RiskDecision(False, "PRICE_TICK", f"{field_name} violates price tick")
         try:
-            decision = self._rule(spec).check(
+            decision = self._rule_for(spec).check(
                 order_intent, account_snapshot, state, spec, self.ledger
             )
             if not decision.accepted:
                 return decision
-            decision = self._check_reservations(order_intent, account_snapshot, state, spec)
+            reservation = self._reservation_requirement(order_intent, state, spec)
+            decision = self._check_reservations(
+                order_intent,
+                account_snapshot,
+                state,
+                spec,
+                requirement=reservation,
+            )
             if not decision.accepted:
                 return decision
         except ValidationError as exc:
             return RiskDecision(False, "RULE_CONFIGURATION", str(exc))
-        return self._check_order_policies(order_intent, event_time=as_of)
+        decision = self._check_order_policies(order_intent, event_time=as_of)
+        if decision.accepted and prepared_reservation is not None:
+            prepared_reservation.append(reservation)
+        return decision
 
     def reserve(self, intent: OrderIntent) -> None:
         spec = self.instruments[intent.instrument_id]
         state = self._states[intent.instrument_id]
-        cash, margin, position = self._reservation_requirement(intent, state, spec)
+        self._reserve_requirement(intent, self._reservation_requirement(intent, state, spec))
+
+    def _reserve_requirement(
+        self,
+        intent: OrderIntent,
+        requirement: tuple[
+            tuple[str, Decimal] | None,
+            Decimal,
+            tuple[str, Decimal] | None,
+        ],
+    ) -> None:
+        cash, margin, position = requirement
         if cash is not None:
             prior = self._cash_reservations.get(intent.idempotency_key)
             expected = (cash[0], cash[1], cash[1])
@@ -531,6 +576,13 @@ class RuleBookRiskGate:
         return self._check_runtime_policies(event_time=snapshot.event_time)
 
     def runtime_check_current(self, event_time: datetime) -> RiskDecision:
+        event_time = ensure_utc_datetime(event_time, field="event_time")
+        if (
+            not self.policies
+            and type(self.ledger) is ExactAccountLedger
+            and not self.ledger.has_open_derivative_position
+        ):
+            return _ACCEPTED_DECISION
         if self.ledger.liquidation_required(event_time):
             return RiskDecision(
                 False,
@@ -665,7 +717,7 @@ class RuleBookRiskGate:
         if fill.side is Side.SELL:
             return _ACCEPTED_DECISION
         state = self._states[fill.instrument_id]
-        rate = self._rule(spec).fee_rate(fill, order, state, spec, self.ledger)
+        rate = self._fee_rate_for(fill, order, state, spec)
         required = (
             decimal(fill.quantity)
             * decimal(fill.price)
@@ -690,7 +742,7 @@ class RuleBookRiskGate:
     def fee_for(self, fill: Fill, order: Order) -> Fee | None:
         spec = self.instruments[fill.instrument_id]
         state = self._states[fill.instrument_id]
-        rate = self._rule(spec).fee_rate(fill, order, state, spec, self.ledger)
+        rate = self._fee_rate_for(fill, order, state, spec)
         fee_type = "maker" if fill.liquidity_role is LiquidityRole.MAKER else "taker"
         unit_notional = decimal(fill.price) * decimal(spec.contract_multiplier)
         if spec.asset_class is AssetClass.FUTURE:
@@ -710,20 +762,22 @@ class RuleBookRiskGate:
             amount = decimal(fill.quantity) * unit_notional * rate
         if amount == 0:
             return None
-        return Fee(
-            fee_id=(
-                "fee-"
-                + hashlib.sha256(
-                    f"{fill.fill_id}|{amount}|{fee_type}|{spec.settlement_currency}".encode()
-                ).hexdigest()[:24]
-            ),
-            fill_id=fill.fill_id,
-            account_id=fill.account_id,
-            amount=fixed(amount, self.money_scale),
-            currency=spec.settlement_currency,
-            event_time=fill.event_time,
-            fee_type=fee_type,
+        fee = object.__new__(Fee)
+        object.__setattr__(
+            fee,
+            "fee_id",
+            "fee-"
+            + hashlib.sha256(
+                f"{fill.fill_id}|{amount}|{fee_type}|{spec.settlement_currency}".encode()
+            ).hexdigest()[:24],
         )
+        object.__setattr__(fee, "fill_id", fill.fill_id)
+        object.__setattr__(fee, "account_id", fill.account_id)
+        object.__setattr__(fee, "amount", fixed(amount, self.money_scale))
+        object.__setattr__(fee, "currency", spec.settlement_currency)
+        object.__setattr__(fee, "event_time", fill.event_time)
+        object.__setattr__(fee, "fee_type", fee_type)
+        return fee
 
     def _check_reservations(
         self,
@@ -731,8 +785,15 @@ class RuleBookRiskGate:
         snapshot: AccountSnapshot,
         state: MarketState,
         spec: InstrumentSpec,
+        *,
+        requirement: tuple[
+            tuple[str, Decimal] | None,
+            Decimal,
+            tuple[str, Decimal] | None,
+        ]
+        | None = None,
     ) -> RiskDecision:
-        cash, margin, position = self._reservation_requirement(intent, state, spec)
+        cash, margin, position = requirement or self._reservation_requirement(intent, state, spec)
         if cash is not None:
             currency, required = cash
             reserved = sum(
@@ -863,6 +924,27 @@ class RuleBookRiskGate:
         raise ValidationError(
             f"unsupported asset rule for {spec.asset_class.value}/{spec.product_type}"
         )
+
+    def _rule_for(self, spec: InstrumentSpec) -> _AssetRule:
+        rule = self._rules.get(spec.instrument_id)
+        if rule is None:
+            rule = self._rule(spec)
+            self._rules[spec.instrument_id] = rule
+        return rule
+
+    def _fee_rate_for(
+        self,
+        fill: Fill,
+        order: Order,
+        state: MarketState,
+        spec: InstrumentSpec,
+    ) -> Decimal:
+        key = (spec.instrument_id, fill.side, fill.liquidity_role)
+        rate = self._fee_rates.get(key)
+        if rate is None:
+            rate = self._rule_for(spec).fee_rate(fill, order, state, spec, self.ledger)
+            self._fee_rates[key] = rate
+        return rate
 
 
 def _intent_price(intent: OrderIntent, state: MarketState) -> Decimal | None:

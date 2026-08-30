@@ -1,0 +1,88 @@
+Sat Aug 29 11:00:22 2026    validation/performance/m7-optimized-replay-only.prof
+
+         1128828 function calls (1128655 primitive calls) in 0.487 seconds
+
+   Ordered by: cumulative time
+   List reduced from 201 to 80 due to restriction <80>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.011    0.011    0.505    0.505 engine.py:134(replay)
+     2000    0.005    0.000    0.224    0.000 engine.py:300(_match_and_commit)
+     1000    0.002    0.000    0.164    0.000 engine.py:409(_commit_fill)
+     2000    0.001    0.000    0.100    0.000 ledger.py:712(_apply_replay_event)
+     2000    0.006    0.000    0.098    0.000 ledger.py:526(_apply)
+     2000    0.002    0.000    0.066    0.000 ledger.py:970(_translate)
+     1000    0.004    0.000    0.058    0.000 broker.py:130(submit)
+     2000    0.006    0.000    0.056    0.000 rules.py:429(_check)
+     5001    0.009    0.000    0.054    0.000 schemas.py:536(execution_payload)
+        1    0.000    0.000    0.053    0.053 ledger.py:204(journal_sha256)
+     2000    0.007    0.000    0.048    0.000 state_machine.py:21(transition_order)
+     2001    0.003    0.000    0.046    0.000 ledger.py:1302(_make_transaction)
+     2000    0.005    0.000    0.042    0.000 matching.py:178(match)
+     1000    0.007    0.000    0.039    0.000 ledger.py:999(_fill_transaction)
+     1000    0.001    0.000    0.038    0.000 rules.py:402(check_open_order_current)
+     1000    0.003    0.000    0.036    0.000 broker.py:210(apply_fill)
+     1000    0.001    0.000    0.034    0.000 rules.py:371(check_current)
+    12002    0.018    0.000    0.034    0.000 temporal_v2.py:16(ensure_utc_datetime)
+     6002    0.003    0.000    0.033    0.000 schemas.py:522(_posting_payload)
+    16004    0.031    0.000    0.031    0.000 schemas.py:501(_fixed)
+     2001    0.011    0.000    0.029    0.000 contracts.py:423(__post_init__)
+     2000    0.004    0.000    0.028    0.000 engine.py:513(_strategy_intents)
+     1000    0.002    0.000    0.026    0.000 matching.py:121(_fill)
+     1000    0.001    0.000    0.025    0.000 ledger.py:1137(_cash_income_transaction)
+     6001    0.015    0.000    0.024    0.000 _json.py:9(flat_sequence_bytes)
+     1000    0.006    0.000    0.023    0.000 rules.py:697(fee_for)
+   224134    0.019    0.000    0.022    0.000 {built-in method builtins.isinstance}
+     3000    0.009    0.000    0.021    0.000 rules.py:817(_reservation_requirement)
+     2000    0.004    0.000    0.021    0.000 rules.py:735(_check_reservations)
+     2000    0.008    0.000    0.021    0.000 rules.py:234(check)
+    28026    0.012    0.000    0.019    0.000 contracts.py:95(_required_text)
+     2000    0.003    0.000    0.017    0.000 benchmark_replay.py:108(on_event)
+    58003    0.012    0.000    0.017    0.000 <string>:2(__hash__)
+     3000    0.003    0.000    0.017    0.000 broker.py:24(_digest)
+     3000    0.002    0.000    0.015    0.000 rules.py:537(runtime_check_current)
+     2000    0.005    0.000    0.015    0.000 dataclasses.py:1540(replace)
+     2000    0.005    0.000    0.015    0.000 contracts.py:229(__post_init__)
+     1000    0.001    0.000    0.014    0.000 broker.py:126(_intent_hash)
+        3    0.000    0.000    0.014    0.005 __init__.py:183(dumps)
+        3    0.000    0.000    0.014    0.005 encoder.py:183(encode)
+        3    0.014    0.005    0.014    0.005 encoder.py:205(iterencode)
+     2001    0.009    0.000    0.013    0.000 ledger.py:1320(_post)
+     1000    0.004    0.000    0.013    0.000 contracts.py:285(__post_init__)
+    17000    0.009    0.000    0.012    0.000 rules.py:50(_metadata_decimal)
+     3000    0.007    0.000    0.012    0.000 contracts.py:183(__post_init__)
+    53296    0.012    0.000    0.012    0.000 {method 'get' of 'dict' objects}
+     1000    0.004    0.000    0.012    0.000 broker.py:34(_intent_bytes)
+     1000    0.003    0.000    0.011    0.000 contracts.py:323(__post_init__)
+     1000    0.004    0.000    0.011    0.000 contracts.py:141(__post_init__)
+     2001    0.002    0.000    0.011    0.000 ledger.py:60(_identifier)
+     8005    0.004    0.000    0.010    0.000 {built-in method builtins.any}
+     2000    0.005    0.000    0.009    0.000 rules.py:794(_current_view)
+        1    0.000    0.000    0.009    0.009 ledger.py:54(_canonical)
+     1000    0.004    0.000    0.009    0.000 rules.py:639(check_fill)
+     1000    0.001    0.000    0.009    0.000 matching.py:32(_fill_id)
+     1000    0.001    0.000    0.009    0.000 rules.py:475(reserve)
+     5001    0.002    0.000    0.008    0.000 schemas.py:497(_time)
+     4000    0.004    0.000    0.007    0.000 _fixed.py:40(aligned)
+     6003    0.007    0.000    0.007    0.000 {method 'isoformat' of 'datetime.datetime' objects}
+     7000    0.004    0.000    0.007    0.000 rules.py:875(_intent_price)
+     2000    0.004    0.000    0.007    0.000 ledger.py:418(observe_market)
+    58073    0.007    0.000    0.007    0.000 {built-in method builtins.getattr}
+     6002    0.002    0.000    0.007    0.000 ledger.py:1267(_posting)
+    24004    0.006    0.000    0.006    0.000 {method 'utcoffset' of 'datetime.datetime' objects}
+    58003    0.006    0.000    0.006    0.000 {built-in method builtins.hash}
+     2000    0.003    0.000    0.006    0.000 rules.py:349(observe)
+    56052    0.006    0.000    0.006    0.000 {method 'strip' of 'str' objects}
+     3000    0.002    0.000    0.005    0.000 ledger.py:263(has_open_derivative_position)
+     1000    0.003    0.000    0.005    0.000 matching.py:205(_execution_price)
+     2000    0.003    0.000    0.005    0.000 ledger.py:732(_validate_event)
+     8004    0.005    0.000    0.005    0.000 {built-in method _hashlib.openssl_sha256}
+        2    0.000    0.000    0.005    0.003 engine.py:87(_hash)
+    15002    0.003    0.000    0.005    0.000 enum.py:202(__get__)
+        2    0.000    0.000    0.005    0.002 engine.py:76(_canonical)
+     8004    0.004    0.000    0.004    0.000 {method 'hexdigest' of '_hashlib.HASH' objects}
+    23998    0.004    0.000    0.004    0.000 <string>:2(__eq__)
+     9000    0.003    0.000    0.004    0.000 broker.py:104(open_orders)
+     2000    0.002    0.000    0.004    0.000 rules.py:96(check)
+    28068    0.004    0.000    0.004    0.000 {method 'append' of 'list' objects}
+     3008    0.002    0.000    0.004    0.000 fixed_point.py:22(__post_init__)

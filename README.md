@@ -15,6 +15,22 @@ python -m pip install --no-deps --no-build-isolation --editable .
 python -m pip check
 ```
 
+## v0.5.0 M7 bounded replay artifacts
+
+`DeterministicRunEngine.replay_to_sink` provides bounded artifact batching for long event replays
+while preserving the public in-memory `replay` reference. A completed artifact directory
+is immutable: its canonical manifest records logical stream hashes, physical file hashes, byte
+sizes, counts and run-result metadata. `load_stored_artifacts` verifies the manifest, every Arrow
+schema, contiguous sequence, byte size, physical hash and logical hash before exposing any facts.
+Publication is atomic and refuses to overwrite an existing manifest; failed runs retain
+`FAILED.json` and never receive a complete manifest.
+
+The M7 certification workload is explicit rather than inferred: one order/fill is produced every
+20 market events (5% fill density), and every timed run includes event materialization, strategy,
+risk, matching, fee, exact double-entry ledger, Arrow writing, logical hashing and immutable
+manifest close. The 50%-fill workload remains a separately reported stress workload. Both paths
+are research/backtest/paper-trading only and contain no live-order transport.
+
 ## v0.4.1 M6 dependency governance
 
 The package declares the `execution` layer through `[tool.quant-workspace]`, publishes the ten
@@ -24,8 +40,9 @@ editable-build requirements for Python3.10-3.12. Every registry package is fixed
 version. The `dev` extra names Python3.10's conditional compatibility dependencies explicitly so
 a lock compiled on Python3.12 remains complete for the whole matrix. The internal package is also
 fixed by its released annotated tag:
-`quant-data-kit@v0.6.1`, from `https://github.com/PureSaber/quant-data-kit.git`, resolving to
-commit `edf1351690dc60691cc6330390adcdbf8bc79c5f`.
+`quant-data-kit@v0.7.4`, from `https://github.com/PureSaber/quant-data-kit.git`, resolving to
+commit `ecb04bd5834aeefdf79226c15cba484337785f90` through annotated tag object
+`49976e938c0b00c0a083b0c4175cc6a879a3f988`.
 
 Regenerate the lock only after reviewing dependency changes in `pyproject.toml`:
 
@@ -112,6 +129,24 @@ the ledger journal hash.
 The three committed golden runs cover A-shares, domestic futures, and crypto spot plus
 linear perpetual funding. They are regression fixtures, not performance marketing.
 
+For long replays, `DeterministicRunEngine.replay_to_sink` accepts an already deterministically
+sorted event iterator and writes orders, order events, fills, fees, settlements, ledger
+transactions and risk events into bounded Arrow IPC batches. The returned `RunResult`, frozen
+logical hashes, exact ledger state and event ordering remain byte-identical to `replay` while
+`engine.stored_artifacts` replaces the in-memory `RunArtifacts` graph. Existing consumers may
+continue to call `replay`; migration consumers should read `StoredRunArtifacts` iterators and
+must retain the immutable source-market-data snapshot separately.
+
+```python
+sink = ArrowReplayArtifactSink("run/artifacts", batch_size=8192, queue_batches=2)
+result = engine.replay_to_sink(sorted_events, seed=42, sink=sink)
+for payload in engine.stored_artifacts.iter_json("fills"):
+    consume(payload)
+
+verified = load_stored_artifacts("run/artifacts")
+assert verified.manifest_sha256 == engine.stored_artifacts.manifest_sha256
+```
+
 ## Verification
 
 ```bash
@@ -121,12 +156,18 @@ python -m pytest --cov=quant_execution --cov-branch --cov-report=term-missing \
   --cov-report=json:coverage.json -q
 python -m coverage report --fail-under=80
 python tools/check_branch_coverage.py coverage.json --threshold 90 \
-  broker contracts schemas engine matching state_machine ledger rules
-python benchmarks/benchmark_replay.py --workload all --repeat 3 --require-rate 50000
+  broker contracts schemas engine matching state_machine ledger rules artifacts
+python benchmarks/benchmark_replay.py --workload matching --matching-events 10000000 \
+  --repeat 3 --require-rate 50000 --memory-limit-gib 16 --artifact-mode arrow \
+  --artifact-root /dedicated/m7-artifacts --artifact-retention keep \
+  --output validation/performance/m7-execution-final-10m.json
 ```
 
-The 50k-events/second replay objective is an explicit local performance gate. The
-no-order workload passes; the exact 50%-fill workload remains below the gate while
-retaining all 1,000 fills, 2,001 balanced transactions, risk checks and final hashes.
-The measured shortfall and required follow-up architecture work are disclosed in
+The 50k-events/second objective is an explicit local performance gate and requires all three
+independent10-million-event processes—not merely their median—to pass. Artifacts are retained,
+strictly reloaded and hash-verified after each timed run. The exact 50%-fill stress workload and
+the earlier materialized-path profile remain disclosed separately in
 [`docs/performance-m3a.md`](docs/performance-m3a.md).
+The artifact-retention contract, differential matrix, benchmark definition and current gate evidence
+are documented in
+[`docs/performance-m7-streaming.md`](docs/performance-m7-streaming.md).

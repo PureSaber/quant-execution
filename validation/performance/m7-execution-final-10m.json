@@ -1,0 +1,111 @@
+[
+  {
+    "artifact_batch_size": 8192,
+    "artifact_bytes_before_cleanup_runs": [
+      1501955792,
+      1501955792,
+      1501955792
+    ],
+    "artifact_cleanup": [
+      "none",
+      "none",
+      "none"
+    ],
+    "artifact_file_sha256": {
+      "fees": "8aa4e3e7ef1ffcdd5be27c4a6b20579cdb5f9e868b92394d66aaf3dc832c7920",
+      "fills": "016b364975e851f263a08c75dcd340ead3f32e4fb183ddb8c44698a123394937",
+      "ledger_transactions": "fb783d3343f59fbfda0bd915056c434d7e6d49e804340dcf64abe0c2a715e1b0",
+      "order_events": "4bd04ccc22fc1c8930d3ce88dc44e42f28318218f94f1cdaa6b96138f27ce498",
+      "orders": "2746b44afff606517be471c14c97ac1dd231b114b202bf33246ff02694c21724"
+    },
+    "artifact_files_removed_runs": [
+      0,
+      0,
+      0
+    ],
+    "artifact_manifest_sha256": "c87db59076f852248416df828ff43cbc7dc96cbf196547e97f6e70081c111f27",
+    "artifact_mode": "arrow",
+    "artifact_paths": [
+      "F:\\puresaber-m7-artifacts\\execution-v0.5.0-sealed-v2-23f6b19\\matching_exact_ledger-10000000-22904",
+      "F:\\puresaber-m7-artifacts\\execution-v0.5.0-sealed-v2-23f6b19\\matching_exact_ledger-10000000-39064",
+      "F:\\puresaber-m7-artifacts\\execution-v0.5.0-sealed-v2-23f6b19\\matching_exact_ledger-10000000-33208"
+    ],
+    "artifact_queue_batches": 2,
+    "artifact_retention": [
+      "keep",
+      "keep",
+      "keep"
+    ],
+    "artifact_volume_free_gib_after_cleanup_runs": [
+      272.89,
+      271.49,
+      270.09
+    ],
+    "artifact_volume_free_gib_before_cleanup_runs": [
+      272.89,
+      271.49,
+      270.09
+    ],
+    "dependencies": {
+      "pyarrow": "25.0.1",
+      "quant_data_kit": "0.7.4"
+    },
+    "events": 10000000,
+    "events_per_s_median": 61473.01,
+    "events_per_s_runs": [
+      58221.53,
+      63906.96,
+      61473.01
+    ],
+    "fill_density": 0.05,
+    "fill_sha256": "68932897888ac2f362bb46191fb2c94bdc7fcc99c46d45b5329c4671ab951dff",
+    "fills": 500000,
+    "git_commit": "23f6b19cc1c4e42fb9df8ce600ad34b254a121a5",
+    "git_dirty_runs": [
+      false,
+      false,
+      false
+    ],
+    "independent_processes": 3,
+    "ledger_sha256": "8fafe941dfefe5867f0e2a3b3de17a5fd551ada395cb69516783ad3bdbf92434",
+    "machine": {
+      "logical_cpus": 16,
+      "platform": "Windows-11-10.0.22631-SP0",
+      "processor": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD"
+    },
+    "memory_gate": true,
+    "memory_scope": "process PeakWorkingSetSize including Arrow and retained replay state",
+    "order_events": 1000000,
+    "order_sha256": "85e3b7ea894109a4380c478c344207dd57975d6d79ba22a8f41fbe190bc5c4d5",
+    "order_stride": 20,
+    "orders": 500000,
+    "peak_working_set_mib": 2248.48,
+    "peak_working_set_mib_runs": [
+      2244.92,
+      2248.48,
+      2243.24
+    ],
+    "python": "3.12.5 (tags/v3.12.5:ff3bc82, Aug  6 2024, 20:45:27) [MSC v.1940 64 bit (AMD64)]",
+    "rate_gate": true,
+    "result_sha256": "cb5907d36a01178d57ad46f4743fed9b1546b2f13ead58b5ce6d016c0cb37db2",
+    "strict_verification_elapsed_s_runs": [
+      3.148932,
+      3.007058,
+      2.968083
+    ],
+    "strict_verification_passed": true,
+    "temp_directories": [
+      "C:\\Users\\1\\AppData\\Local\\Temp",
+      "C:\\Users\\1\\AppData\\Local\\Temp",
+      "C:\\Users\\1\\AppData\\Local\\Temp"
+    ],
+    "timing_scope": "includes event materialization, matching, risk, fill, fee, exact ledger, Arrow sink initialization/write/seal, logical hashes, and manifest close; excludes process startup and static fixture-template construction",
+    "transactions": 1000001,
+    "worker_pids": [
+      22904,
+      39064,
+      33208
+    ],
+    "workload": "matching_exact_ledger"
+  }
+]

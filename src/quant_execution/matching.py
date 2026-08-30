@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
 from datetime import datetime, timedelta
@@ -25,19 +24,19 @@ from quant_data_kit import (
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution._fixed import decimal, fixed
+from quant_execution._json import flat_sequence_bytes
 from quant_execution.broker import remaining_quantity
 from quant_execution.contracts import Fill, LiquidityRole, Order, OrderType, Side, TimeInForce
 
 
 def _fill_id(model: str, event_id: str, order_id: str, index: int, price: FixedPoint) -> str:
-    raw = json.dumps(
-        [model, event_id, order_id, index, price.units, price.scale],
-        separators=(",", ":"),
-    ).encode()
+    raw = flat_sequence_bytes((model, event_id, order_id, index, price.units, price.scale))
     return f"fill-{hashlib.sha256(raw).hexdigest()[:24]}"
 
 
-def _sort_orders(orders: Sequence[Order]) -> list[Order]:
+def _sort_orders(orders: Sequence[Order]) -> Sequence[Order]:
+    if len(orders) < 2:
+        return orders
     return sorted(orders, key=lambda item: (item.intent.created_at, item.order_id))
 
 
@@ -58,7 +57,14 @@ def _price_time_orders(orders: Sequence[Order]) -> list[Order]:
 
 
 def _quantity_from_available(order: Order, available: Decimal) -> FixedPoint:
-    remaining = decimal(remaining_quantity(order))
+    remaining_units = order.intent.quantity.units - order.filled_quantity.units
+    if remaining_units == order.intent.quantity.units:
+        remaining_fp = order.intent.quantity
+    else:
+        remaining_fp = FixedPoint(remaining_units, order.intent.quantity.scale)
+    remaining = decimal(remaining_fp)
+    if available >= remaining:
+        return remaining_fp
     amount = min(remaining, available)
     if amount <= 0:
         return FixedPoint(0, order.intent.quantity.scale)
@@ -122,19 +128,27 @@ class _BaseMatchingModel:
         role: LiquidityRole,
         index: int,
     ) -> Fill:
-        return Fill(
-            fill_id=_fill_id(model, event.event_id, order.order_id, index, price),
-            order_id=order.order_id,
-            account_id=order.intent.account_id,
-            strategy_id=order.intent.strategy_id,
-            instrument_id=order.intent.instrument_id,
-            side=order.intent.side,
-            quantity=quantity,
-            price=price,
-            event_time=event.available_at,
-            liquidity_role=role,
-            venue_trade_id=getattr(event, "event_id", None),
+        if not isinstance(quantity, FixedPoint) or quantity.units <= 0:
+            raise ValidationError("fill quantity must be a positive FixedPoint")
+        if not isinstance(price, FixedPoint) or price.units <= 0:
+            raise ValidationError("fill price must be a positive FixedPoint")
+        if not isinstance(role, LiquidityRole):
+            raise ValidationError("fill liquidity_role must be a LiquidityRole")
+        fill = object.__new__(Fill)
+        object.__setattr__(
+            fill, "fill_id", _fill_id(model, event.event_id, order.order_id, index, price)
         )
+        object.__setattr__(fill, "order_id", order.order_id)
+        object.__setattr__(fill, "account_id", order.intent.account_id)
+        object.__setattr__(fill, "strategy_id", order.intent.strategy_id)
+        object.__setattr__(fill, "instrument_id", order.intent.instrument_id)
+        object.__setattr__(fill, "side", order.intent.side)
+        object.__setattr__(fill, "quantity", quantity)
+        object.__setattr__(fill, "price", price)
+        object.__setattr__(fill, "event_time", event.available_at)
+        object.__setattr__(fill, "liquidity_role", role)
+        object.__setattr__(fill, "venue_trade_id", event.event_id)
+        return fill
 
 
 class BarMatchingModel(_BaseMatchingModel):
@@ -165,8 +179,14 @@ class BarMatchingModel(_BaseMatchingModel):
     def reset(self) -> None:
         self._activated_stop_limits.clear()
 
+    @staticmethod
+    def checkpoint_required(open_orders: Sequence[Order]) -> bool:
+        return any(order.intent.order_type is OrderType.STOP_LIMIT for order in open_orders)
+
     def match(self, market_event: MarketEvent, open_orders: Sequence[Order]) -> Sequence[Fill]:
         if not isinstance(market_event, BarEvent) or not market_event.is_complete:
+            return ()
+        if not open_orders:
             return ()
         capacity = decimal(market_event.volume) * self.participation_rate
         fills: list[Fill] = []

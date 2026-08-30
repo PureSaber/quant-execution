@@ -1,0 +1,35 @@
+[
+  {
+    "events": 20000,
+    "events_per_s_median": 11637.77,
+    "events_per_s_runs": [
+      11702.68,
+      11637.77,
+      11370.44
+    ],
+    "fill_density": 0.5,
+    "fill_sha256": "111cb2eded28d1e36900d91dae7139891e3af086988f0063eafcbb06c20e2623",
+    "fills": 10000,
+    "independent_processes": 3,
+    "ledger_sha256": "471d55977ce169dbb7fee69e72fc18183d95fae0e7af69827dc45542199fd7c1",
+    "memory_gate": true,
+    "order_events": 20000,
+    "order_sha256": "95018ec93663aa987c1a4b6ce89f27197ab274eb4942b8755cb2861085f5ebbc",
+    "orders": 10000,
+    "peak_working_set_mib": 243.59,
+    "peak_working_set_mib_runs": [
+      242.73,
+      242.56,
+      243.59
+    ],
+    "rate_gate": false,
+    "result_sha256": "8e2498f3ac928ab3e723198d6d06a7d15e219234733d9cce59342a23c5008b7f",
+    "transactions": 20001,
+    "worker_pids": [
+      24336,
+      5592,
+      34512
+    ],
+    "workload": "dense_matching_exact_ledger"
+  }
+]
