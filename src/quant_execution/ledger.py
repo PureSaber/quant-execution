@@ -131,6 +131,7 @@ class ExactAccountLedger:
         self._transactions: list[LedgerTransaction] = []
         self._transaction_count = 0
         self._artifact_sink = None
+        self._artifact_stream_closed = False
         self._finalized_journal_sha256: str | None = None
         self._transaction_keys: set[str] = set()
         self._event_fingerprints: dict[str, LedgerEvent | bytes] = {}
@@ -171,6 +172,7 @@ class ExactAccountLedger:
     def start_artifact_stream(self, sink: object) -> None:
         """Move journal retention to a bounded artifact sink after reset."""
 
+        self._require_mutable()
         if self._artifact_sink is not None:
             raise ValidationError("ledger artifact stream is already active")
         if not callable(getattr(sink, "append", None)):
@@ -197,16 +199,24 @@ class ExactAccountLedger:
             raise ValidationError("finalized ledger journal hash must be lowercase SHA-256")
         self._finalized_journal_sha256 = journal_sha256
         self._artifact_sink = None
+        self._artifact_stream_closed = True
         return journal_sha256
 
     def abort_artifact_stream(self) -> None:
-        self._artifact_sink = None
+        if self._artifact_sink is not None:
+            self._artifact_sink = None
+            self._artifact_stream_closed = True
+
+    def _require_mutable(self) -> None:
+        if self._artifact_stream_closed:
+            raise ValidationError("ledger artifact stream is closed; reset is required")
 
     def capture_state(self) -> dict[str, object]:
         return deepcopy(
             {
                 "transactions": self._transactions,
                 "transaction_count": self._transaction_count,
+                "artifact_stream_closed": self._artifact_stream_closed,
                 "finalized_journal_sha256": self._finalized_journal_sha256,
                 "transaction_keys": self._transaction_keys,
                 "event_fingerprints": self._event_fingerprints,
@@ -229,6 +239,7 @@ class ExactAccountLedger:
         restored = deepcopy(state)
         self._transactions = restored["transactions"]
         self._transaction_count = restored["transaction_count"]
+        self._artifact_stream_closed = restored["artifact_stream_closed"]
         self._finalized_journal_sha256 = restored["finalized_journal_sha256"]
         self._transaction_keys = restored["transaction_keys"]
         self._event_fingerprints = restored["event_fingerprints"]
@@ -253,7 +264,7 @@ class ExactAccountLedger:
     def transaction_count(self) -> int:
         return (
             self._transaction_count
-            if self._artifact_sink is not None or self._finalized_journal_sha256 is not None
+            if self._artifact_sink is not None or self._artifact_stream_closed
             else len(self._transactions)
         )
 
@@ -263,6 +274,10 @@ class ExactAccountLedger:
             return self._finalized_journal_sha256
         if self._artifact_sink is not None:
             raise ValidationError("ledger journal hash is unavailable until artifact finalization")
+        if self._artifact_stream_closed:
+            raise ValidationError(
+                "ledger journal hash is unavailable after artifact abort; reset required"
+            )
         digest = hashlib.sha256()
         digest.update(b'{"fx_snapshots":[')
         for index, (currency, rate, event_time) in enumerate(self._fx_history):
@@ -330,6 +345,7 @@ class ExactAccountLedger:
         ).encode()
 
     def set_fx_rate(self, currency: str, rate: FixedPoint, *, event_time: datetime) -> None:
+        self._require_mutable()
         currency = _currency(currency)
         event_time = ensure_utc_datetime(event_time, field="event_time")
         value = decimal(rate)
@@ -486,6 +502,7 @@ class ExactAccountLedger:
     def mark(
         self, event: MarkPriceEvent, *, create_snapshot: bool = True
     ) -> AccountSnapshot | None:
+        self._require_mutable()
         if event.instrument_id not in self.instruments:
             raise ValidationError(f"missing InstrumentSpec for {event.instrument_id}")
         prior = self._mark_fingerprints.get(event.event_id)
@@ -525,6 +542,7 @@ class ExactAccountLedger:
         create_snapshot: bool = True,
         trusted_unique: bool = False,
     ) -> AccountSnapshot | None:
+        self._require_mutable()
         if isinstance(event, MarkPriceEvent):
             return self.mark(event, create_snapshot=create_snapshot)
         price: FixedPoint | None = None
@@ -635,6 +653,7 @@ class ExactAccountLedger:
         local_rollback: bool = True,
         trusted_unique: bool = False,
     ) -> AccountSnapshot | None:
+        self._require_mutable()
         self._validate_event(event)
         reference_id = self._event_identity(event)
         prior = None if trusted_unique else self._event_fingerprints.get(reference_id)
