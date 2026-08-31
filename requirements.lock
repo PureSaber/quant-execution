@@ -58,7 +58,7 @@ pytz==2026.3.post1
     # via pandas
 pyyaml==6.0.3
     # via quant-data-kit
-quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.7.4
+quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@v0.8.1
     # via quant-execution (pyproject.toml)
 referencing==0.37.0
     # via
