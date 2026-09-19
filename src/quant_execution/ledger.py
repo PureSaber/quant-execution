@@ -170,6 +170,108 @@ class ExactAccountLedger:
             )
             self._post(transaction)
 
+    def book_external_cash(
+        self, *, transfer_id: str, amount: FixedPoint, currency: str, event_time: datetime
+    ) -> AccountSnapshot:
+        """Import a confirmed deposit/withdrawal as equity, never trading income."""
+        self._require_mutable()
+        event_time = ensure_utc_datetime(event_time, field="event_time")
+        currency = _currency(currency)
+        if currency != self.base_currency:
+            raise ValidationError("statement cash transfers currently require the base currency")
+        if not transfer_id.strip() or not isinstance(amount, FixedPoint):
+            raise ValidationError("transfer ID and fixed-point amount are required")
+        if amount.scale > self.money_scale:
+            raise ValidationError("transfer precision exceeds ledger money scale")
+        transaction = self._make_transaction(
+            event_type=LedgerEventType.SETTLEMENT,
+            reference_id=f"external:{transfer_id}",
+            idempotency_key=f"external:{transfer_id}",
+            event_time=event_time,
+            postings=(
+                self._posting("assets:cash", currency, decimal(amount)),
+                self._posting("equity:external_flows", currency, -decimal(amount)),
+            ),
+        )
+        if self._import_seen(transaction):
+            return self.snapshot(self._event_time)
+        if event_time < self._event_time or self.cash_balance(currency) + decimal(amount) < 0:
+            raise ValidationError("external cash would reverse time or overdraw account")
+        self._post(transaction)
+        self._event_time = event_time
+        return self.snapshot(event_time)
+
+    def book_opening_position(
+        self,
+        *,
+        instrument_id: str,
+        quantity: FixedPoint,
+        average_cost: FixedPoint,
+        acquired_on: date,
+    ) -> AccountSnapshot:
+        """Import a statement opening balance without inventing historical fills."""
+        self._require_mutable()
+        spec = self._spec(instrument_id)
+        if self._is_derivative(spec) or decimal(quantity) <= 0 or decimal(average_cost) <= 0:
+            raise ValidationError("opening position requires positive cash-asset quantity and cost")
+        if decimal(quantity) % decimal(spec.quantity_step) or acquired_on > self._event_time.date():
+            raise ValidationError("invalid opening quantity step or acquisition date")
+        cost = decimal(quantity) * decimal(average_cost) * decimal(spec.contract_multiplier)
+        at = self._default_opened_at
+        transaction = self._make_transaction(
+            event_type=LedgerEventType.SETTLEMENT,
+            reference_id=f"opening-position:{instrument_id}",
+            idempotency_key=f"opening-position:{instrument_id}",
+            event_time=at,
+            postings=(
+                self._posting(
+                    "assets:position_cost",
+                    spec.settlement_currency,
+                    cost,
+                    instrument_id=instrument_id,
+                ),
+                self._posting("equity:opening", spec.settlement_currency, -cost),
+                self._posting(
+                    "assets:position",
+                    spec.settlement_currency,
+                    Decimal(0),
+                    instrument_id=instrument_id,
+                    quantity_delta=decimal(quantity),
+                    quantity_scale=quantity.scale,
+                ),
+                self._posting(
+                    "memo:position_counter",
+                    spec.settlement_currency,
+                    Decimal(0),
+                    instrument_id=instrument_id,
+                    quantity_delta=-decimal(quantity),
+                    quantity_scale=quantity.scale,
+                ),
+            ),
+        )
+        if self._import_seen(transaction):
+            if self._position_lots.get(instrument_id) != [(acquired_on, decimal(quantity))]:
+                raise ValidationError("opening acquisition date changed")
+            return self.snapshot(self._event_time)
+        if self._event_time != at or self._positions.get(instrument_id, 0):
+            raise ValidationError("positions may only be imported before account activity")
+        self._post(transaction)
+        self._position_lots[instrument_id] = [(acquired_on, decimal(quantity))]
+        self._marks[instrument_id] = (decimal(average_cost), at, transaction.reference_id)
+        return self.snapshot(at)
+
+    def _import_seen(self, transaction: LedgerTransaction) -> bool:
+        if self._artifact_sink is not None:
+            raise ValidationError("manual imports are unavailable during artifact streaming")
+        if transaction.idempotency_key not in self._transaction_keys:
+            return False
+        previous = next(
+            t for t in self._transactions if t.idempotency_key == transaction.idempotency_key
+        )
+        if previous != transaction:
+            raise ValidationError("import ID reused with different content")
+        return True
+
     def start_artifact_stream(self, sink: object) -> None:
         """Move journal retention to a bounded artifact sink after reset."""
 
