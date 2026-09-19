@@ -39,10 +39,11 @@ externally resolved dependency set. The lock covers runtime dependencies, the `d
 editable-build requirements for Python3.10-3.12. Every registry package is fixed to one exact
 version. The `dev` extra names Python3.10's conditional compatibility dependencies explicitly so
 a lock compiled on Python3.12 remains complete for the whole matrix. The internal package is also
-fixed by its released annotated tag:
-`quant-data-kit@v0.8.1`, from `https://github.com/PureSaber/quant-data-kit.git`, resolving to
-commit `8f258f11be8e4d8edddcd41b79b817bd6c925970` through annotated tag object
-`87fc686dfb2d5ac2f86eca0132b3cdf05ff87c63`.
+fixed to the reviewed research-data revision in this development branch:
+`quant-data-kit@8fed47b8f62694c36830dec270cfa21759133f2f`, from
+`https://github.com/PureSaber/quant-data-kit.git`. The project declaration and lock
+use the same immutable source as the daily A-share research stack, so a clean
+resolver does not combine incompatible direct URLs. Existing release tags remain unchanged.
 
 Regenerate the lock only after reviewing dependency changes in `pyproject.toml`:
 
