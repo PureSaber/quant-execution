@@ -1,5 +1,14 @@
 # quant-execution
 
+Hong Kong daily cash-equity research is available through
+`quant_execution.hong_kong.HKDailyExecution`: explicit board lots, dated and
+individually rounded fees, same-day sales, T+2 proceeds restrictions and the
+shared exact ledger. Callers supply a settlement calendar independently from
+trading sessions. This opening-price model does not implement HK intraday
+matching; the generic rule book rejects XHKG/HKEX/SEHK securities instead of
+silently routing them to A-share rules. See `PureSaber/quant-hk-equity` for the
+research recipe and evidence limitations.
+
 Deterministic execution, matching, risk hooks, and multi-currency ledger contracts for
 PureSaber quantitative research, backtesting, and paper trading.
 
