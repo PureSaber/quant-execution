@@ -813,10 +813,19 @@ class ExactAccountLedger:
             transaction = self._translate(event)
             if local_rollback:
                 undo = self._capture_apply_undo(event, transaction, reference_id)
-            if local_rollback:
-                self._post(transaction)
-            else:
-                self._post(transaction, local_rollback=False)
+            # Corporate-action announcements are market events even when this
+            # account holds no eligible shares. Preserve event identity, time and
+            # split state, but do not invent a zero-effect accounting transaction.
+            no_effect_action = isinstance(event, CorporateActionEvent) and not any(
+                posting.amount.units
+                or (posting.quantity_delta is not None and posting.quantity_delta.units)
+                for posting in transaction.postings
+            )
+            if not no_effect_action:
+                if local_rollback:
+                    self._post(transaction)
+                else:
+                    self._post(transaction, local_rollback=False)
             if isinstance(event, Fill):
                 self._fills[event.fill_id] = event
                 self._fill_trading_days[event.fill_id] = trading_day
