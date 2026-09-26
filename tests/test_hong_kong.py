@@ -130,3 +130,24 @@ def test_calendar_and_unavailable_rules_fail_before_a_fill():
     with pytest.raises(ValueError, match=r"T\+2"):
         order(broker, "x", Side.BUY)
     assert not broker.executed
+
+
+def test_settlement_clock_cannot_reopen_a_closed_session():
+    broker = account()
+    broker.settle_end_of_day(T0.date())
+    with pytest.raises(ValueError, match="already settled"):
+        order(broker, "late", Side.BUY)
+    with pytest.raises(ValueError, match="backwards"):
+        broker.settle_end_of_day(T0.date() - timedelta(days=1))
+
+
+def test_non_cash_assets_are_rejected():
+    future = replace(instrument(), asset_class=AssetClass.FUTURE)
+    with pytest.raises(ValueError, match="only accepts"):
+        HKDailyExecution(
+            {"00700": future},
+            initial_cash=fp(100000),
+            opened_at=T0,
+            fees=schedule(),
+            settlement_days=[T0.date()],
+        )

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
-from quant_data_kit import FixedPoint, InstrumentSpec, MarkPriceEvent
+from quant_data_kit import AssetClass, FixedPoint, InstrumentSpec, MarkPriceEvent
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution.contracts import Fee, Fill, Side
@@ -99,7 +99,11 @@ class HKDailyExecution:
         if sorted(set(settlement_days)) != settlement_days:
             raise ValueError("Settlement calendar must be unique and sorted")
         for spec in instruments.values():
-            if spec.venue != "XHKG" or spec.settlement_currency != "HKD":
+            if (
+                spec.venue != "XHKG"
+                or spec.settlement_currency != "HKD"
+                or spec.asset_class not in {AssetClass.EQUITY, AssetClass.ETF}
+            ):
                 raise ValueError("HK daily execution only accepts XHKG/HKD instruments")
             lot = int(spec.metadata["lot_size"])
             if lot <= 0 or spec.metadata["stamp_exempt"] not in {"true", "false"}:
@@ -117,13 +121,17 @@ class HKDailyExecution:
         )
         self.pending: list[tuple[date, Decimal]] = []
         self.executed: dict[str, tuple[tuple, Fill, dict]] = {}
+        self.last_settlement_day: date | None = None
 
     def available_cash(self) -> Decimal:
         return self.ledger.cash_balance("HKD") - sum((x[1] for x in self.pending), Decimal(0))
 
     def settle_end_of_day(self, day: date) -> None:
         # Settlement occurs at day end. Proceeds cannot fund morning trades on T+2.
+        if self.last_settlement_day is not None and day < self.last_settlement_day:
+            raise ValueError("Settlement date cannot move backwards")
         self.pending = [item for item in self.pending if item[0] > day]
+        self.last_settlement_day = day
 
     def settlement_date(self, day: date) -> date:
         future = [d for d in self.settlement_days if d > day]
@@ -184,6 +192,8 @@ class HKDailyExecution:
         if spec.available_at > at:
             raise ValueError("Instrument rules were unavailable at execution time")
         day = at.date()  # HK opening/closing research events are on the same UTC date.
+        if self.last_settlement_day is not None and day <= self.last_settlement_day:
+            raise ValueError("Cannot trade on a session already settled at day end")
         charges = self.costs(symbol, price, quantity, day)
         if quantity % int(spec.metadata["lot_size"]):
             raise ValueError("Order is not a whole board lot")
