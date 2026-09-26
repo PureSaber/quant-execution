@@ -168,6 +168,35 @@ class _AssetRule:
         return _metadata_decimal(spec, key, default="0")
 
 
+class USCashEquityRule(_AssetRule):
+    """Explicit US cash equity rule; settlement is separate from resale permission."""
+
+    code = "US_CASH_EQUITY"
+
+    def check(self, intent, snapshot, state, spec, ledger):
+        from quant_execution.us_cash import settled_cash
+
+        base = super().check(intent, snapshot, state, spec, ledger)
+        if not base.accepted:
+            return base
+        if spec.settlement_currency != "USD":
+            return RiskDecision(False, "US_CURRENCY", "US cash research requires USD")
+        quantity = decimal(intent.quantity)
+        if intent.side is Side.SELL and quantity > _value(
+            snapshot.positions.get(spec.instrument_id)
+        ):
+            return RiskDecision(False, "US_NO_SHORT", "cash account cannot sell short")
+        if intent.side is Side.BUY:
+            cost = quantity * _intent_price(intent, state) * decimal(spec.contract_multiplier)
+            cost *= Decimal(1) + _metadata_decimal(spec, "commission_rate")
+            if cost > settled_cash(ledger, state.event.available_at):
+                return RiskDecision(False, "US_UNSETTLED_CASH", "insufficient settled USD")
+        return _ACCEPTED_DECISION
+
+    def fee_rate(self, fill, order, state, spec, ledger):
+        return _metadata_decimal(spec, "commission_rate")
+
+
 class AShareRule(_AssetRule):
     code = "A_SHARE"
 
@@ -956,6 +985,8 @@ class RuleBookRiskGate:
     def _rule(spec: InstrumentSpec) -> _AssetRule:
         product = spec.product_type.lower()
         if spec.asset_class in {AssetClass.EQUITY, AssetClass.ETF}:
+            if product in {"us_equity", "us_etf"}:
+                return USCashEquityRule()
             return AShareRule()
         if spec.asset_class is AssetClass.FUTURE:
             return FuturesRule()
