@@ -313,6 +313,15 @@ def test_cash_dividend_payment_requires_entitlement_but_allows_zero_holding() ->
         currency="CNY",
     )
     ledger.apply(entitlement)
+    duplicate_entitlement = CorporateActionEvent(
+        **event_fields("dividend:duplicate-entitlement", STOCK, seconds=1, trading_day=trading_day),
+        action_type="cash_dividend_entitlement",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    with pytest.raises(ValidationError, match="entitlement is already registered"):
+        ledger.apply(duplicate_entitlement)
     ledger.apply(payment)
     assert ledger.cash_balance("CNY") == Decimal(2000)
     assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == 0
