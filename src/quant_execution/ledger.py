@@ -1302,10 +1302,12 @@ class ExactAccountLedger:
         if event.action_type == "cash_dividend_payment":
             del self._dividend_entitlements[key]
             return
-        spec = self._spec(event.instrument_id)
-        quantity = self._positions.get(event.instrument_id, Decimal(0))
         assert event.cash_amount is not None
-        total = quantity * decimal(event.cash_amount) * decimal(spec.contract_multiplier)
+        receivable_key = self._dividend_receivable_instrument(key)
+        total = self._accounts.get(
+            ("assets:dividend_receivable", str(event.currency), receivable_key),
+            Decimal(0),
+        )
         self._dividend_entitlements[key] = (decimal(event.cash_amount), total)
 
     def _validate_corporate_action(self, event: CorporateActionEvent) -> None:

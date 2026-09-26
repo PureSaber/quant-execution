@@ -318,6 +318,47 @@ def test_cash_dividend_payment_requires_entitlement_but_allows_zero_holding() ->
     assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == 0
 
 
+def test_dividend_entitlement_uses_pre_split_quantity_for_later_payment() -> None:
+    trading_day = date(2026, 1, 3)
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments={STOCK: stock_spec()},
+        initial_cash={"CNY": fp("2000")},
+    )
+    ledger.mark(mark(STOCK, "10", 1))
+    ledger.apply_with_trading_day(
+        fill("buy-before-split", STOCK, Side.BUY, "100", "10", seconds=1),
+        trading_day=trading_day,
+    )
+    entitlement = CorporateActionEvent(
+        **event_fields("dividend:split-entitlement", STOCK, seconds=2, trading_day=trading_day),
+        action_type="cash_dividend_entitlement",
+        effective_date=trading_day,
+        ratio=fp("2"),
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(entitlement)
+    assert ledger.snapshot().positions[STOCK].to_decimal() == Decimal(200)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == Decimal(15)
+    payment = CorporateActionEvent(
+        **event_fields(
+            "dividend:split-payment",
+            STOCK,
+            seconds=3,
+            trading_day=trading_day + timedelta(days=5),
+        ),
+        action_type="cash_dividend_payment",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(payment)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == 0
+    assert ledger.cash_balance("CNY") == Decimal(1015)
+
+
 def test_missing_fx_is_fail_closed() -> None:
     ledger = ExactAccountLedger(
         account_id="account",
