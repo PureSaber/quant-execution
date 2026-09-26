@@ -144,6 +144,7 @@ class ExactAccountLedger:
         self._fill_trading_days: dict[str, date] = {}
         self._position_lots: dict[str, list[tuple[date, Decimal]]] = {}
         self._fill_close_allocations: dict[str, tuple[Decimal, Decimal]] = {}
+        self._dividend_entitlements: dict[tuple[str, str, date], tuple[Decimal, Decimal]] = {}
         self._posting_cache: dict[
             tuple[str, str, Decimal, str | None, Decimal | None, int], Posting
         ] = {}
@@ -331,6 +332,7 @@ class ExactAccountLedger:
                 "fill_trading_days": self._fill_trading_days,
                 "position_lots": self._position_lots,
                 "fill_close_allocations": self._fill_close_allocations,
+                "dividend_entitlements": self._dividend_entitlements,
                 "posting_cache": self._posting_cache,
                 "fx": self._fx,
                 "fx_history": self._fx_history,
@@ -360,6 +362,7 @@ class ExactAccountLedger:
         self._fill_trading_days = restored["fill_trading_days"]
         self._position_lots = restored["position_lots"]
         self._fill_close_allocations = restored["fill_close_allocations"]
+        self._dividend_entitlements = restored["dividend_entitlements"]
         self._posting_cache = restored["posting_cache"]
         self._fx = restored["fx"]
         self._fx_history = restored["fx_history"]
@@ -504,6 +507,42 @@ class ExactAccountLedger:
     def cash_balance(self, currency: str) -> Decimal:
         return self._accounts.get(("assets:cash", currency, None), Decimal(0))
 
+    def dividend_receivable_balance(
+        self,
+        currency: str,
+        *,
+        instrument_id: str | None = None,
+    ) -> Decimal:
+        """Return declared cash dividends that have not reached their payment date."""
+
+        currency = _currency(currency)
+        return sum(
+            (
+                amount
+                for (account, entry_currency, receivable_key), amount in self._accounts.items()
+                if account == "assets:dividend_receivable"
+                and entry_currency == currency
+                and (
+                    instrument_id is None
+                    or (
+                        receivable_key is not None
+                        and receivable_key.startswith(f"{instrument_id}@")
+                    )
+                )
+            ),
+            Decimal(0),
+        )
+
+    def _dividend_receivable_value(self, event_time: datetime) -> Decimal:
+        return sum(
+            (
+                self._to_base(amount, currency, event_time)
+                for (account, currency, _), amount in self._accounts.items()
+                if account == "assets:dividend_receivable"
+            ),
+            Decimal(0),
+        )
+
     @property
     def has_open_derivative_position(self) -> bool:
         return any(
@@ -525,6 +564,7 @@ class ExactAccountLedger:
             (self._to_base(amount, currency, event_time) for currency, amount in cash.items()),
             Decimal(0),
         )
+        nav += self._dividend_receivable_value(event_time)
         initial_margin = Decimal(0)
         for instrument_id, quantity in self._positions.items():
             spec = self._spec(instrument_id)
@@ -733,6 +773,7 @@ class ExactAccountLedger:
             ),
             Decimal(0),
         )
+        nav += self._dividend_receivable_value(at)
         maintenance_margin = Decimal(0)
         for instrument_id, quantity in self._positions.items():
             spec = self._spec(instrument_id)
@@ -839,8 +880,10 @@ class ExactAccountLedger:
                     event.event_time,
                     event.settlement_id,
                 )
-            elif isinstance(event, CorporateActionEvent) and event.ratio is not None:
-                self._apply_split_state(event)
+            elif isinstance(event, CorporateActionEvent):
+                self._apply_dividend_state(event)
+                if event.ratio is not None:
+                    self._apply_split_state(event)
             if not trusted_unique:
                 self._event_fingerprints[reference_id] = (
                     self._event_fingerprint(event) if self._artifact_sink is not None else event
@@ -878,6 +921,12 @@ class ExactAccountLedger:
             and posting.quantity_delta is not None
         }
         instrument_id = getattr(event, "instrument_id", None)
+        entitlement_key = (
+            self._dividend_entitlement_key(event)
+            if isinstance(event, CorporateActionEvent)
+            and event.action_type in {"cash_dividend_entitlement", "cash_dividend_payment"}
+            else None
+        )
         return {
             "transaction_count": len(self._transactions),
             "transaction_key": transaction.idempotency_key in self._transaction_keys,
@@ -906,6 +955,12 @@ class ExactAccountLedger:
             ),
             "mark": (
                 self._marks.get(instrument_id, _MISSING) if instrument_id is not None else _MISSING
+            ),
+            "dividend_entitlement_key": entitlement_key,
+            "dividend_entitlement": (
+                self._dividend_entitlements.get(entitlement_key, _MISSING)
+                if entitlement_key is not None
+                else _MISSING
             ),
             "event_time": self._event_time,
         }
@@ -948,6 +1003,13 @@ class ExactAccountLedger:
                 undo["position_lots"],
             )
             self._restore_value(self._marks, instrument_id, undo["mark"])
+        entitlement_key = undo["dividend_entitlement_key"]
+        if entitlement_key is not None:
+            self._restore_value(
+                self._dividend_entitlements,
+                entitlement_key,
+                undo["dividend_entitlement"],
+            )
         self._event_time = undo["event_time"]
 
     @staticmethod
@@ -1086,6 +1148,7 @@ class ExactAccountLedger:
         nav = sum(
             (self._to_base(value, currency, at) for currency, value in cash.items()), Decimal(0)
         )
+        nav += self._dividend_receivable_value(at)
         initial_margin = Decimal(0)
         maintenance_margin = Decimal(0)
         for instrument_id, quantity in sorted(self._positions.items()):
@@ -1142,6 +1205,7 @@ class ExactAccountLedger:
         at = snapshot.event_time
         for currency, balance in snapshot.cash_balances.items():
             expected += self._to_base(decimal(balance), currency, at)
+        expected += self._dividend_receivable_value(at)
         for instrument_id, quantity_fp in snapshot.positions.items():
             spec = self._spec(instrument_id)
             quantity = decimal(quantity_fp)
@@ -1222,8 +1286,60 @@ class ExactAccountLedger:
                 event.event_id,
             )
 
+    @staticmethod
+    def _dividend_entitlement_key(event: CorporateActionEvent) -> tuple[str, str, date]:
+        assert event.currency is not None
+        return (event.instrument_id, str(event.currency), event.effective_date)
+
+    @staticmethod
+    def _dividend_receivable_instrument(key: tuple[str, str, date]) -> str:
+        return f"{key[0]}@{key[2].isoformat()}"
+
+    def _apply_dividend_state(self, event: CorporateActionEvent) -> None:
+        if event.action_type not in {"cash_dividend_entitlement", "cash_dividend_payment"}:
+            return
+        key = self._dividend_entitlement_key(event)
+        if event.action_type == "cash_dividend_payment":
+            del self._dividend_entitlements[key]
+            return
+        assert event.cash_amount is not None
+        receivable_key = self._dividend_receivable_instrument(key)
+        total = self._accounts.get(
+            ("assets:dividend_receivable", str(event.currency), receivable_key),
+            Decimal(0),
+        )
+        self._dividend_entitlements[key] = (decimal(event.cash_amount), total)
+
     def _validate_corporate_action(self, event: CorporateActionEvent) -> None:
         spec = self._spec(event.instrument_id)
+        if event.action_type in {"cash_dividend_entitlement", "cash_dividend_payment"}:
+            if event.cash_amount is None or event.currency is None:
+                raise ValidationError(f"{event.action_type} requires cash_amount and currency")
+            if decimal(event.cash_amount) < 0:
+                raise ValidationError("cash dividend amount must be non-negative")
+            key = self._dividend_entitlement_key(event)
+            declaration = self._dividend_entitlements.get(key)
+            if event.action_type == "cash_dividend_entitlement" and declaration is not None:
+                raise ValidationError("cash dividend entitlement is already registered")
+            if event.action_type == "cash_dividend_payment" and event.ratio is not None:
+                raise ValidationError("cash dividend payment cannot carry a share ratio")
+            if event.action_type == "cash_dividend_payment":
+                if declaration is None:
+                    raise ValidationError("cash dividend payment has no registered entitlement")
+                declared_amount, declared_total = declaration
+                if decimal(event.cash_amount) != declared_amount:
+                    raise ValidationError(
+                        "cash dividend payment amount does not match the registered entitlement"
+                    )
+                receivable_key = self._dividend_receivable_instrument(key)
+                ledger_total = self._accounts.get(
+                    ("assets:dividend_receivable", str(event.currency), receivable_key),
+                    Decimal(0),
+                )
+                if ledger_total != declared_total:
+                    raise ValidationError(
+                        "cash dividend receivable does not match the registered entitlement"
+                    )
         if event.ratio is None:
             return
         ratio = decimal(event.ratio)
@@ -1492,18 +1608,51 @@ class ExactAccountLedger:
         quantity = self._positions.get(event.instrument_id, Decimal(0))
         postings: list[Posting] = []
         if event.cash_amount is not None:
-            cash_delta = quantity * decimal(event.cash_amount) * decimal(spec.contract_multiplier)
-            postings.extend(
-                [
-                    self._posting("assets:cash", str(event.currency), cash_delta),
-                    self._posting(
-                        "income:corporate_action",
-                        str(event.currency),
-                        -cash_delta,
-                        instrument_id=event.instrument_id,
-                    ),
-                ]
-            )
+            currency = str(event.currency)
+            receivable_key = f"{event.instrument_id}@{event.effective_date.isoformat()}"
+            if event.action_type == "cash_dividend_payment":
+                entitlement_key = self._dividend_entitlement_key(event)
+                cash_delta = self._dividend_entitlements[entitlement_key][1]
+                postings.extend(
+                    [
+                        self._posting("assets:cash", currency, cash_delta),
+                        self._posting(
+                            "assets:dividend_receivable",
+                            currency,
+                            -cash_delta,
+                            instrument_id=receivable_key,
+                        ),
+                    ]
+                )
+            else:
+                cash_delta = (
+                    quantity * decimal(event.cash_amount) * decimal(spec.contract_multiplier)
+                )
+                asset_account = (
+                    "assets:dividend_receivable"
+                    if event.action_type == "cash_dividend_entitlement"
+                    else "assets:cash"
+                )
+                postings.extend(
+                    [
+                        self._posting(
+                            asset_account,
+                            currency,
+                            cash_delta,
+                            instrument_id=(
+                                receivable_key
+                                if event.action_type == "cash_dividend_entitlement"
+                                else None
+                            ),
+                        ),
+                        self._posting(
+                            "income:corporate_action",
+                            currency,
+                            -cash_delta,
+                            instrument_id=event.instrument_id,
+                        ),
+                    ]
+                )
         if event.ratio is not None:
             quantity_delta = quantity * (decimal(event.ratio) - Decimal(1))
             postings.extend(

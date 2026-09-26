@@ -206,6 +206,168 @@ def test_corporate_action_multi_currency_fx_and_night_trading_day() -> None:
     assert snapshot.nav.to_decimal() == Decimal(1514)
 
 
+def test_cash_dividend_receivable_preserves_entitlement_until_payment() -> None:
+    trading_day = date(2026, 1, 3)
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments={STOCK: stock_spec()},
+        initial_cash={"CNY": fp("2000")},
+    )
+    ledger.mark(mark(STOCK, "10", 1))
+    ledger.apply_with_trading_day(
+        fill("buy-entitled", STOCK, Side.BUY, "100", "10", seconds=1),
+        trading_day=trading_day,
+    )
+    ledger.mark(mark(STOCK, "9.85", 2))
+    entitlement = CorporateActionEvent(
+        **event_fields("dividend:entitlement", STOCK, seconds=3, trading_day=trading_day),
+        action_type="cash_dividend_entitlement",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(entitlement)
+    entitled = ledger.snapshot()
+    assert ledger.cash_balance("CNY") == Decimal(1000)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == Decimal(15)
+    assert entitled.nav.to_decimal() == Decimal(2000)
+    assert ledger.portfolio_risk_snapshot(
+        entitlement.event_time
+    ).cash_value.to_decimal() == Decimal(1000)
+
+    ledger.apply_with_trading_day(
+        fill("sell-after-record", STOCK, Side.SELL, "100", "9.85", seconds=4),
+        trading_day=trading_day + timedelta(days=1),
+    )
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == Decimal(15)
+    mismatched_payment = CorporateActionEvent(
+        **event_fields(
+            "dividend:mismatched-payment",
+            STOCK,
+            seconds=5,
+            trading_day=trading_day + timedelta(days=5),
+        ),
+        action_type="cash_dividend_payment",
+        effective_date=trading_day,
+        cash_amount=fp("99"),
+        currency="CNY",
+    )
+    with pytest.raises(ValidationError, match="does not match the registered entitlement"):
+        ledger.apply(mismatched_payment)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == Decimal(15)
+    payment = CorporateActionEvent(
+        **event_fields(
+            "dividend:payment",
+            STOCK,
+            seconds=5,
+            trading_day=trading_day + timedelta(days=5),
+        ),
+        action_type="cash_dividend_payment",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(payment)
+    paid = ledger.snapshot()
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == 0
+    assert paid.cash_balances["CNY"].to_decimal() == Decimal(2000)
+    assert paid.nav.to_decimal() == Decimal(2000)
+    assert ledger.portfolio_risk_snapshot(payment.event_time).cash_value.to_decimal() == Decimal(
+        2000
+    )
+    assert all(
+        sum(posting.amount.units for posting in transaction.postings) == 0
+        for transaction in ledger.transactions
+    )
+
+
+def test_cash_dividend_payment_requires_entitlement_but_allows_zero_holding() -> None:
+    trading_day = date(2026, 1, 3)
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments={STOCK: stock_spec()},
+        initial_cash={"CNY": fp("2000")},
+    )
+    payment = CorporateActionEvent(
+        **event_fields(
+            "dividend:isolated-payment",
+            STOCK,
+            seconds=1,
+            trading_day=trading_day + timedelta(days=5),
+        ),
+        action_type="cash_dividend_payment",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    with pytest.raises(ValidationError, match="has no registered entitlement"):
+        ledger.apply(payment)
+
+    entitlement = CorporateActionEvent(
+        **event_fields("dividend:zero-entitlement", STOCK, seconds=1, trading_day=trading_day),
+        action_type="cash_dividend_entitlement",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(entitlement)
+    duplicate_entitlement = CorporateActionEvent(
+        **event_fields("dividend:duplicate-entitlement", STOCK, seconds=1, trading_day=trading_day),
+        action_type="cash_dividend_entitlement",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    with pytest.raises(ValidationError, match="entitlement is already registered"):
+        ledger.apply(duplicate_entitlement)
+    ledger.apply(payment)
+    assert ledger.cash_balance("CNY") == Decimal(2000)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == 0
+
+
+def test_dividend_entitlement_uses_pre_split_quantity_for_later_payment() -> None:
+    trading_day = date(2026, 1, 3)
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments={STOCK: stock_spec()},
+        initial_cash={"CNY": fp("2000")},
+    )
+    ledger.mark(mark(STOCK, "10", 1))
+    ledger.apply_with_trading_day(
+        fill("buy-before-split", STOCK, Side.BUY, "100", "10", seconds=1),
+        trading_day=trading_day,
+    )
+    entitlement = CorporateActionEvent(
+        **event_fields("dividend:split-entitlement", STOCK, seconds=2, trading_day=trading_day),
+        action_type="cash_dividend_entitlement",
+        effective_date=trading_day,
+        ratio=fp("2"),
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(entitlement)
+    assert ledger.snapshot().positions[STOCK].to_decimal() == Decimal(200)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == Decimal(15)
+    payment = CorporateActionEvent(
+        **event_fields(
+            "dividend:split-payment",
+            STOCK,
+            seconds=3,
+            trading_day=trading_day + timedelta(days=5),
+        ),
+        action_type="cash_dividend_payment",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(payment)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == 0
+    assert ledger.cash_balance("CNY") == Decimal(1015)
+
+
 def test_missing_fx_is_fail_closed() -> None:
     ledger = ExactAccountLedger(
         account_id="account",

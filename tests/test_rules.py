@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
+import pytest
 from conftest import T0, event_fields, fp, spec
 from quant_data_kit import AssetClass, MarginMode, MarkPriceEvent, StatusEvent, TradeEvent
+from quant_data_kit.exceptions import ValidationError
 
 from quant_execution import (
     Fill,
@@ -13,6 +15,7 @@ from quant_execution import (
     OrderType,
     Side,
     TimeInForce,
+    resolve_a_share_replay_status,
 )
 from quant_execution.broker import DeterministicBroker
 from quant_execution.ledger import ExactAccountLedger
@@ -184,6 +187,55 @@ def test_a_share_lot_t1_limit_status_and_stamp_duty() -> None:
         gate.check(intent(STOCK, Side.BUY, "100", key="halted"), ledger.snapshot()).code
         == "MARKET_NOT_TRADABLE"
     )
+
+
+def test_a_share_replay_status_is_closed_and_lifecycle_aware() -> None:
+    assert (
+        resolve_a_share_replay_status(
+            listed=True,
+            delisted=False,
+            tradable=True,
+            limit_up=False,
+            limit_down=False,
+        )
+        == "open"
+    )
+    assert (
+        resolve_a_share_replay_status(
+            listed=True,
+            delisted=False,
+            tradable=False,
+            limit_up=False,
+            limit_down=False,
+        )
+        == "suspended"
+    )
+    assert (
+        resolve_a_share_replay_status(
+            listed=False,
+            delisted=True,
+            tradable=False,
+            limit_up=False,
+            limit_down=False,
+        )
+        == "closed"
+    )
+    with pytest.raises(ValidationError, match="delisted"):
+        resolve_a_share_replay_status(
+            listed=True,
+            delisted=True,
+            tradable=False,
+            limit_up=False,
+            limit_down=False,
+        )
+    with pytest.raises(ValidationError, match="both"):
+        resolve_a_share_replay_status(
+            listed=True,
+            delisted=False,
+            tradable=True,
+            limit_up=True,
+            limit_down=True,
+        )
 
 
 def test_futures_margin_reduce_only_night_day_and_close_today_fee() -> None:
