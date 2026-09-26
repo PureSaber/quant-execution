@@ -107,6 +107,17 @@ Risk policies are read-only plugins: built-in asset/cash/position/margin checks 
 first, policies cannot transmit orders, and missing mark/FX context or policy errors
 produce explicit rejection codes instead of bypassing risk.
 
+`resolve_a_share_replay_status` converts a complete point-in-time listing/tradability/price-limit
+snapshot into the existing `open`, `suspended`, `limit_up`, `limit_down`, or `closed` QExec status.
+It rejects contradictory or missing-typed flags and deliberately has no universe-membership input:
+leaving an index or strategy universe is not evidence of delisting or a disposal transaction.
+
+Deferred cash dividends use two explicit ledger events. `cash_dividend_entitlement` recognizes an
+`assets:dividend_receivable` on the ex-date so NAV includes the evidenced entitlement without
+making it spendable cash. `cash_dividend_payment` moves that exact receivable into cash on the true
+payment date. The payment remains valid after the position is sold because entitlement is fixed on
+the ex-date; missing payment dates must be rejected by the upstream corporate-action bridge.
+
 ## Deterministic replay
 
 `DeterministicRunEngine.replay` sorts by availability/event time and stable stream

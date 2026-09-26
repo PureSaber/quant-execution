@@ -54,6 +54,7 @@ from quant_execution.rules import (
     LinearPerpetualRule,
     MarketState,
     RuleBookRiskGate,
+    resolve_a_share_replay_status,
 )
 from quant_execution.schemas import (
     ACCOUNT_SNAPSHOT_SCHEMA_ID,
@@ -143,6 +144,7 @@ __all__ = [
     "get_json_schema",
     "load_stored_artifacts",
     "remaining_quantity",
+    "resolve_a_share_replay_status",
     "transition_order",
     "validate_arrow_table",
     "validate_json_record",

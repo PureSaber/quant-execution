@@ -75,6 +75,48 @@ class MarketState:
     status: str
 
 
+def resolve_a_share_replay_status(
+    *,
+    listed: bool,
+    delisted: bool,
+    tradable: bool,
+    limit_up: bool,
+    limit_down: bool,
+) -> str:
+    """Map complete point-in-time A-share flags to one QExec market status.
+
+    Listing lifecycle and index/universe membership are intentionally separate.
+    Callers must never turn a universe exit into ``delisted=True``.
+    """
+
+    flags = {
+        "listed": listed,
+        "delisted": delisted,
+        "tradable": tradable,
+        "limit_up": limit_up,
+        "limit_down": limit_down,
+    }
+    if any(type(value) is not bool for value in flags.values()):
+        raise ValidationError("A-share replay status flags must be booleans")
+    if delisted and listed:
+        raise ValidationError("a delisted instrument cannot remain listed")
+    if not listed and (tradable or limit_up or limit_down):
+        raise ValidationError("an unlisted instrument cannot be tradable or price-limited")
+    if not tradable and (limit_up or limit_down):
+        raise ValidationError("a non-tradable instrument cannot be at a tradable price limit")
+    if limit_up and limit_down:
+        raise ValidationError("an instrument cannot be both limit-up and limit-down")
+    if not listed:
+        return "closed"
+    if not tradable:
+        return "suspended"
+    if limit_up:
+        return "limit_up"
+    if limit_down:
+        return "limit_down"
+    return "open"
+
+
 @dataclass(frozen=True, slots=True)
 class _RiskAccountView:
     account_id: str
