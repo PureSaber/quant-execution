@@ -1,11 +1,14 @@
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
 import pandas as pd
 import pytest
-from quant_data_kit import CorporateActionEvent
+from quant_data_kit import CorporateActionEvent, MarkPriceEvent
+from quant_data_kit.exceptions import ValidationError
 
-from quant_execution.rules import RuleBookRiskGate, USCashEquityRule
+from quant_execution.contracts import OrderIntent, OrderType, Side, TimeInForce
+from quant_execution.rules import MarketState, RuleBookRiskGate, USCashEquityRule
 from quant_execution.us_cash import USCashAccount, fp, instrument, settled_cash
 
 
@@ -116,3 +119,65 @@ def test_fractional_sales_round_postings_before_pnl():
     for number in range(30):
         a.trade("US:A", "-1.389008", str(102 + number / 13), at, f"sell{number}")
     a.validate_balance()
+
+
+def test_us_risk_gate_checks_currency_settlement_shorting_and_fee():
+    a = account(commission_bps=0, slippage_bps=0)
+    at = pd.Timestamp("2024-05-24T14:00Z").to_pydatetime()
+    spec = a.ledger.instruments["US:A"]
+    event = MarkPriceEvent(**a._fields("risk-mark", "US:A", at), price=fp(100))
+    state = MarketState(event=event, reference_price=fp(100), status="open")
+    intent = OrderIntent(
+        idempotency_key="risk",
+        account_id="us-research",
+        strategy_id="test",
+        instrument_id="US:A",
+        side=Side.BUY,
+        quantity=fp(1, 6),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        created_at=at,
+    )
+    rule = USCashEquityRule()
+    snapshot = a.ledger.snapshot()
+    assert rule.check(intent, snapshot, state, spec, a.ledger).accepted
+    assert not rule.check(
+        intent, snapshot, replace(state, reference_price=None), spec, a.ledger
+    ).accepted
+    assert (
+        rule.check(intent, snapshot, state, replace(spec, settlement_currency="CNY"), a.ledger).code
+        == "US_CURRENCY"
+    )
+    sell = replace(intent, side=Side.SELL)
+    assert rule.check(sell, snapshot, state, spec, a.ledger).code == "US_NO_SHORT"
+    a.mark("US:A", 100, at, "m")
+    a.trade("US:A", 10, 100, at, "b")
+    assert rule.check(sell, a.ledger.snapshot(), state, spec, a.ledger).accepted
+    a.trade("US:A", -10, 100, at, "s")
+    assert (
+        rule.check(intent, a.ledger.snapshot(), state, spec, a.ledger).code == "US_UNSETTLED_CASH"
+    )
+    assert rule.fee_rate(
+        None, None, state, replace(spec, metadata={"commission_rate": "0.001"}), a.ledger
+    ) == Decimal("0.001")
+
+
+@pytest.mark.parametrize(
+    "ratio,cash,currency",
+    [(1, 0, "USD"), (None, 0, "USD"), (0, None, "USD"), (0, -1, "USD"), (0, 0, "CNY")],
+)
+def test_terminal_action_rejects_incomplete_or_invalid_evidence(ratio, cash, currency):
+    a = account()
+    before = a.ledger.snapshot()
+    with pytest.raises(ValidationError):
+        a.ledger.apply(
+            CorporateActionEvent(
+                **a._fields("invalid-terminal", "US:A", "2024-05-28T13:30Z"),
+                action_type="terminal_cash",
+                effective_date=date(2024, 5, 28),
+                ratio=None if ratio is None else fp(ratio, 6),
+                cash_amount=None if cash is None else fp(cash),
+                currency=currency,
+            )
+        )
+    assert a.ledger.snapshot() == before
