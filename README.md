@@ -116,7 +116,10 @@ Deferred cash dividends use two explicit ledger events. `cash_dividend_entitleme
 `assets:dividend_receivable` on the ex-date so NAV includes the evidenced entitlement without
 making it spendable cash. `cash_dividend_payment` moves that exact receivable into cash on the true
 payment date. The payment remains valid after the position is sold because entitlement is fixed on
-the ex-date; missing payment dates must be rejected by the upstream corporate-action bridge.
+the ex-date. The ledger rejects a payment without the matching entitlement or with a different
+cash-per-share amount or receivable total, while a registered zero-holding entitlement remains a
+valid zero-effect lifecycle event. Missing payment dates must be rejected by the upstream
+corporate-action bridge.
 
 ## Deterministic replay
 

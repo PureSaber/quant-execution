@@ -241,6 +241,21 @@ def test_cash_dividend_receivable_preserves_entitlement_until_payment() -> None:
         trading_day=trading_day + timedelta(days=1),
     )
     assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == Decimal(15)
+    mismatched_payment = CorporateActionEvent(
+        **event_fields(
+            "dividend:mismatched-payment",
+            STOCK,
+            seconds=5,
+            trading_day=trading_day + timedelta(days=5),
+        ),
+        action_type="cash_dividend_payment",
+        effective_date=trading_day,
+        cash_amount=fp("99"),
+        currency="CNY",
+    )
+    with pytest.raises(ValidationError, match="does not match the registered entitlement"):
+        ledger.apply(mismatched_payment)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == Decimal(15)
     payment = CorporateActionEvent(
         **event_fields(
             "dividend:payment",
@@ -265,6 +280,42 @@ def test_cash_dividend_receivable_preserves_entitlement_until_payment() -> None:
         sum(posting.amount.units for posting in transaction.postings) == 0
         for transaction in ledger.transactions
     )
+
+
+def test_cash_dividend_payment_requires_entitlement_but_allows_zero_holding() -> None:
+    trading_day = date(2026, 1, 3)
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments={STOCK: stock_spec()},
+        initial_cash={"CNY": fp("2000")},
+    )
+    payment = CorporateActionEvent(
+        **event_fields(
+            "dividend:isolated-payment",
+            STOCK,
+            seconds=1,
+            trading_day=trading_day + timedelta(days=5),
+        ),
+        action_type="cash_dividend_payment",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    with pytest.raises(ValidationError, match="has no registered entitlement"):
+        ledger.apply(payment)
+
+    entitlement = CorporateActionEvent(
+        **event_fields("dividend:zero-entitlement", STOCK, seconds=1, trading_day=trading_day),
+        action_type="cash_dividend_entitlement",
+        effective_date=trading_day,
+        cash_amount=fp("0.15"),
+        currency="CNY",
+    )
+    ledger.apply(entitlement)
+    ledger.apply(payment)
+    assert ledger.cash_balance("CNY") == Decimal(2000)
+    assert ledger.dividend_receivable_balance("CNY", instrument_id=STOCK) == 0
 
 
 def test_missing_fx_is_fail_closed() -> None:
