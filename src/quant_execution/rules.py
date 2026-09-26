@@ -956,6 +956,9 @@ class RuleBookRiskGate:
     def _rule(spec: InstrumentSpec) -> _AssetRule:
         product = spec.product_type.lower()
         if spec.asset_class in {AssetClass.EQUITY, AssetClass.ETF}:
+            from quant_execution.hong_kong import reject_generic_hk_rule
+
+            reject_generic_hk_rule(spec)
             return AShareRule()
         if spec.asset_class is AssetClass.FUTURE:
             return FuturesRule()
