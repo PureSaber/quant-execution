@@ -987,6 +987,9 @@ class RuleBookRiskGate:
         if spec.asset_class in {AssetClass.EQUITY, AssetClass.ETF}:
             if product in {"us_equity", "us_etf"}:
                 return USCashEquityRule()
+            from quant_execution.hong_kong import reject_generic_hk_rule
+
+            reject_generic_hk_rule(spec)
             return AShareRule()
         if spec.asset_class is AssetClass.FUTURE:
             return FuturesRule()

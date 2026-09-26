@@ -36,6 +36,8 @@ def fp(value, scale: int = 8) -> FixedPoint:
 
 
 def settled_cash(ledger: ExactAccountLedger, at: datetime) -> Decimal:
+    if utc(at).to_pydatetime() < ledger.snapshot().event_time:
+        raise ValueError("cash query cannot precede current account state")
     day = str(utc(at).tz_convert("America/New_York").date())
     pending = Decimal(0)
     for transaction in ledger.transactions:
@@ -94,7 +96,11 @@ class USCashAccount:
         if not 0 <= self.commission < 1 or not 0 <= self.slippage < 1 or money(initial_cash) <= 0:
             raise ValueError("invalid cash or costs")
         if any(
-            spec.settlement_currency != "USD" or spec.product_type not in {"us_equity", "us_etf"}
+            spec.settlement_currency != "USD"
+            or spec.quote_currency != "USD"
+            or spec.asset_class not in {AssetClass.EQUITY, AssetClass.ETF}
+            or spec.product_type not in {"us_equity", "us_etf"}
+            or spec.contract_multiplier.to_decimal() != 1
             for spec in instruments.values()
         ):
             raise ValueError("explicit USD US equity instruments required")
@@ -132,6 +138,7 @@ class USCashAccount:
         }
 
     def mark(self, instrument_id, price, at, event_id):
+        self._check_time(at)
         self.ledger.mark(
             MarkPriceEvent(**self._fields(event_id, instrument_id, at), price=fp(price))
         )
@@ -139,6 +146,7 @@ class USCashAccount:
     def action(
         self, instrument_id, at, event_id, *, ratio=None, cash=None, payment=False, ex_date=None
     ):
+        self._check_time(at)
         fields = self._fields(event_id, instrument_id, at)
         effective = fields["trading_day"] if ex_date is None else ex_date
         self.ledger.apply(
@@ -154,6 +162,10 @@ class USCashAccount:
             )
         )
 
+    def _check_time(self, at):
+        if utc(at).to_pydatetime() < self.ledger.snapshot().event_time:
+            raise ValueError("account event cannot precede current account state")
+
     def trade(self, instrument_id, quantity, reference_price, at, trade_id) -> dict:
         quantity, price = money(quantity), money(reference_price)
         stamp = utc(at).to_pydatetime()
@@ -162,6 +174,7 @@ class USCashAccount:
             if self._trades[trade_id] != fingerprint:
                 raise ValueError("trade id reused with changed content")
             return next(row for row in self.fills if row["trade_id"] == trade_id)
+        self._check_time(stamp)
         if quantity == 0 or price <= 0:
             raise ValueError("nonzero quantity and positive price required")
         side = Side.BUY if quantity > 0 else Side.SELL

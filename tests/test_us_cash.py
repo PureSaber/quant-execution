@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pandas as pd
 import pytest
-from quant_data_kit import CorporateActionEvent, MarkPriceEvent
+from quant_data_kit import AssetClass, CorporateActionEvent, MarkPriceEvent
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution.contracts import OrderIntent, OrderType, Side, TimeInForce
@@ -181,3 +181,29 @@ def test_terminal_action_rejects_incomplete_or_invalid_evidence(ratio, cash, cur
             )
         )
     assert a.ledger.snapshot() == before
+
+
+def test_us_cash_rejects_non_cash_assets_even_if_product_label_is_us():
+    at = pd.Timestamp("2024-05-24T14:00Z").to_pydatetime()
+    spec = replace(instrument("US:A", "A", at), asset_class=AssetClass.FUTURE)
+    with pytest.raises(ValueError, match="USD US equity"):
+        USCashAccount({"US:A": spec}, 1000, at)
+
+
+def test_account_events_and_cash_queries_cannot_rewind_state():
+    a = account(commission_bps=0, slippage_bps=0)
+    at = "2024-05-24T14:00Z"
+    a.mark("US:A", 100, at, "m")
+    a.trade("US:A", 1, 100, at, "b")
+    a.mark("US:A", 100, "2024-05-28T14:00Z", "next")
+    before = a.ledger.snapshot()
+    for call in (
+        lambda: a.buying_power(at),
+        lambda: a.mark("US:A", 99, at, "old"),
+        lambda: a.action("US:A", at, "old-split", ratio=2),
+        lambda: a.trade("US:A", -1, 100, at, "old-sale"),
+    ):
+        with pytest.raises(ValueError, match="precede"):
+            call()
+        assert a.ledger.snapshot() == before
+    assert a.trade("US:A", 1, 100, at, "b") == a.fills[0]

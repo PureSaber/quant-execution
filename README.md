@@ -1,5 +1,14 @@
 # quant-execution
 
+Hong Kong daily cash-equity research is available through
+`quant_execution.hong_kong.HKDailyExecution`: explicit board lots, dated and
+individually rounded fees, same-day sales, T+2 proceeds restrictions and the
+shared exact ledger. Callers supply a settlement calendar independently from
+trading sessions. This opening-price model does not implement HK intraday
+matching; the generic rule book rejects XHKG/HKEX/SEHK securities instead of
+silently routing them to A-share rules. See `PureSaber/quant-hk-equity` for the
+research recipe and evidence limitations.
+
 Deterministic execution, matching, risk hooks, and multi-currency ledger contracts for
 PureSaber quantitative research, backtesting, and paper trading.
 
@@ -40,7 +49,7 @@ editable-build requirements for Python3.10-3.12. Every registry package is fixed
 version. The `dev` extra names Python3.10's conditional compatibility dependencies explicitly so
 a lock compiled on Python3.12 remains complete for the whole matrix. The internal package is also
 fixed to the reviewed research-data revision in this development branch:
-`quant-data-kit@6c40fedfd01fb6cff795c3faeacb04ff7f094c83`, from
+`quant-data-kit@7a8813b3d1e52f476f8fe51f05ea714be41a52bb`, from
 `https://github.com/PureSaber/quant-data-kit.git`. The project declaration and lock
 use the same immutable source as the US research stack in this branch, so a clean
 resolver does not combine incompatible direct URLs. Existing release tags remain unchanged.
