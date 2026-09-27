@@ -12,11 +12,13 @@ requires-python = ">=3.10"
 dependencies = [
     "pyarrow>=14.0",
     "jsonschema>=4.20",
-    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@104f1ef8a3b1278c0ea5420fadaa9d1d863ce726",
+    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@271a65ee383158b3dd7570e19a3f2b4123f09f79",
 ]
 
 [project.optional-dependencies]
+us-research = ["exchange-calendars>=4.5,<5"]
 dev = [
+    "exchange-calendars>=4.5,<5",
     "exceptiongroup>=1",
     "pytest>=7.4",
     "pytest-cov>=5.0",

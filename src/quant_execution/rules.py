@@ -79,9 +79,9 @@ def resolve_a_share_replay_status(
     *,
     listed: bool,
     delisted: bool,
-    tradable: bool,
-    limit_up: bool,
-    limit_down: bool,
+    tradable: bool | None,
+    limit_up: bool | None,
+    limit_down: bool | None,
 ) -> str:
     """Map complete point-in-time A-share flags to one QExec market status.
 
@@ -96,8 +96,10 @@ def resolve_a_share_replay_status(
         "limit_up": limit_up,
         "limit_down": limit_down,
     }
-    if any(type(value) is not bool for value in flags.values()):
+    if any(value is not None and type(value) is not bool for value in flags.values()):
         raise ValidationError("A-share replay status flags must be booleans")
+    if any(value is None for value in flags.values()):
+        return "unknown"
     if delisted and listed:
         raise ValidationError("a delisted instrument cannot remain listed")
     if not listed and (tradable or limit_up or limit_down):
@@ -166,6 +168,35 @@ class _AssetRule:
         del order, state, ledger
         key = "maker_fee_rate" if fill.liquidity_role is LiquidityRole.MAKER else "taker_fee_rate"
         return _metadata_decimal(spec, key, default="0")
+
+
+class USCashEquityRule(_AssetRule):
+    """Explicit US cash equity rule; settlement is separate from resale permission."""
+
+    code = "US_CASH_EQUITY"
+
+    def check(self, intent, snapshot, state, spec, ledger):
+        from quant_execution.us_cash import settled_cash
+
+        base = super().check(intent, snapshot, state, spec, ledger)
+        if not base.accepted:
+            return base
+        if spec.settlement_currency != "USD":
+            return RiskDecision(False, "US_CURRENCY", "US cash research requires USD")
+        quantity = decimal(intent.quantity)
+        if intent.side is Side.SELL and quantity > _value(
+            snapshot.positions.get(spec.instrument_id)
+        ):
+            return RiskDecision(False, "US_NO_SHORT", "cash account cannot sell short")
+        if intent.side is Side.BUY:
+            cost = quantity * _intent_price(intent, state) * decimal(spec.contract_multiplier)
+            cost *= Decimal(1) + _metadata_decimal(spec, "commission_rate")
+            if cost > settled_cash(ledger, state.event.available_at):
+                return RiskDecision(False, "US_UNSETTLED_CASH", "insufficient settled USD")
+        return _ACCEPTED_DECISION
+
+    def fee_rate(self, fill, order, state, spec, ledger):
+        return _metadata_decimal(spec, "commission_rate")
 
 
 class AShareRule(_AssetRule):
@@ -389,7 +420,12 @@ class RuleBookRiskGate:
 
     def observe(self, event: MarketEvent) -> None:
         prior = self._states.get(event.instrument_id)
+        spec = self.instruments.get(event.instrument_id)
+        strict = spec is not None and spec.metadata.get("requires_status_evidence") == "true"
+        same_day = prior is not None and prior.event.trading_day == event.trading_day
         status = prior.status if prior is not None else "open"
+        if strict and not same_day:
+            status = "unknown"
         reference = prior.reference_price if prior is not None else None
         if isinstance(event, StatusEvent):
             status = event.status.lower()
@@ -509,6 +545,8 @@ class RuleBookRiskGate:
             spec.effective_to is not None and as_of >= spec.effective_to
         ):
             return RiskDecision(False, "INSTRUMENT_INACTIVE", "instrument lifecycle is inactive")
+        if state.status in {"unknown", "no_restriction"}:
+            return RiskDecision(False, "MARKET_STATUS_UNKNOWN", state.status)
         if state.status in {"halted", "suspended", "closed"}:
             return RiskDecision(False, "MARKET_NOT_TRADABLE", state.status)
         if state.status == "limit_up" and order_intent.side is Side.BUY:
@@ -956,6 +994,8 @@ class RuleBookRiskGate:
     def _rule(spec: InstrumentSpec) -> _AssetRule:
         product = spec.product_type.lower()
         if spec.asset_class in {AssetClass.EQUITY, AssetClass.ETF}:
+            if product in {"us_equity", "us_etf"}:
+                return USCashEquityRule()
             from quant_execution.hong_kong import reject_generic_hk_rule
 
             reject_generic_hk_rule(spec)

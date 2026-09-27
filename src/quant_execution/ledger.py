@@ -802,6 +802,12 @@ class ExactAccountLedger:
         rounded_maintenance = fixed(maintenance_margin, self.money_scale)
         return rounded_maintenance.units > 0 and rounded_nav.units <= rounded_maintenance.units
 
+    def apply_corporate_action(self, action, *, at):
+        """Apply evidenced cross-market terms atomically without synthetic trades."""
+        from quant_execution.corporate_actions import apply_action
+
+        return apply_action(self, action, at=at)
+
     def apply(self, event: LedgerEvent, *, create_snapshot: bool = True) -> AccountSnapshot | None:
         trading_day = event.event_time.date() if isinstance(event, Fill) else None
         return self._apply(
@@ -1273,6 +1279,10 @@ class ExactAccountLedger:
         return lots, prior_close, today_close
 
     def _apply_split_state(self, event: CorporateActionEvent) -> None:
+        if event.action_type == "terminal_cash":
+            self._position_lots[event.instrument_id] = []
+            self._marks.pop(event.instrument_id, None)
+            return
         ratio = decimal(event.ratio)
         self._position_lots[event.instrument_id] = [
             (day, quantity * ratio)
@@ -1312,6 +1322,19 @@ class ExactAccountLedger:
 
     def _validate_corporate_action(self, event: CorporateActionEvent) -> None:
         spec = self._spec(event.instrument_id)
+        if event.action_type == "terminal_cash":
+            if (
+                spec.asset_class not in {AssetClass.EQUITY, AssetClass.ETF}
+                or event.ratio is None
+                or event.ratio.units != 0
+                or event.cash_amount is None
+                or event.cash_amount.units < 0
+                or event.currency != spec.settlement_currency
+            ):
+                raise ValidationError(
+                    "terminal_cash requires a zero share ratio and nonnegative settlement cash"
+                )
+            return
         if event.action_type in {"cash_dividend_entitlement", "cash_dividend_payment"}:
             if event.cash_amount is None or event.currency is None:
                 raise ValidationError(f"{event.action_type} requires cash_amount and currency")
@@ -1474,7 +1497,11 @@ class ExactAccountLedger:
                     ]
                 )
             else:
-                cost_removed = average * quantity * multiplier
+                # Quantize cash and removed book cost first. Independently rounding
+                # their difference can leave a one-unit imbalance for fractional
+                # equity fills. P&L is the exact residual of the posted amounts.
+                notional = decimal(fixed(notional, self.money_scale))
+                cost_removed = decimal(fixed(average * quantity * multiplier, self.money_scale))
                 postings.extend(
                     [
                         self._posting("assets:cash", spec.settlement_currency, notional),
@@ -1606,6 +1633,47 @@ class ExactAccountLedger:
     def _corporate_action_transaction(self, event: CorporateActionEvent) -> LedgerTransaction:
         spec = self._spec(event.instrument_id)
         quantity = self._positions.get(event.instrument_id, Decimal(0))
+        if event.action_type == "terminal_cash":
+            cash = decimal(fixed(quantity * decimal(event.cash_amount), self.money_scale))
+            cost = self._position_cost(event.instrument_id, derivative=False)
+            postings = (
+                self._posting("assets:cash", spec.settlement_currency, cash),
+                self._posting(
+                    "assets:position_cost",
+                    spec.settlement_currency,
+                    -cost,
+                    instrument_id=event.instrument_id,
+                ),
+                self._posting(
+                    "income:realized_pnl",
+                    spec.settlement_currency,
+                    cost - cash,
+                    instrument_id=event.instrument_id,
+                ),
+                self._posting(
+                    "assets:position",
+                    spec.settlement_currency,
+                    Decimal(0),
+                    instrument_id=event.instrument_id,
+                    quantity_delta=-quantity,
+                    quantity_scale=spec.quantity_step.scale,
+                ),
+                self._posting(
+                    "memo:position_counter",
+                    spec.settlement_currency,
+                    Decimal(0),
+                    instrument_id=event.instrument_id,
+                    quantity_delta=quantity,
+                    quantity_scale=spec.quantity_step.scale,
+                ),
+            )
+            return self._make_transaction(
+                event_type=LedgerEventType.CORPORATE_ACTION,
+                reference_id=event.event_id,
+                idempotency_key=f"corporate_action:{event.event_id}",
+                event_time=event.available_at,
+                postings=postings,
+            )
         postings: list[Posting] = []
         if event.cash_amount is not None:
             currency = str(event.currency)

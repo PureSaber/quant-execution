@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -25,6 +26,30 @@ STOCK = "equity:sse:600000"
 FUTURE = "future:cffex:IF2603"
 SPOT = "crypto:test:BTCUSDT"
 PERP = "crypto:test:BTCUSDT-PERP"
+
+
+def test_evidenced_status_expires_each_trading_day_and_missing_is_blocked():
+    instruments = specs()
+    instruments[STOCK] = replace(
+        instruments[STOCK],
+        metadata={**instruments[STOCK].metadata, "requires_status_evidence": "true"},
+    )
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments=instruments,
+        initial_cash={"CNY": fp("100000")},
+        opened_at=T0,
+    )
+    gate = RuleBookRiskGate(instruments=instruments, ledger=ledger)
+    gate.observe(state_event(STOCK, "10"))
+    order = intent(STOCK, Side.BUY, "100", key="strict")
+    assert gate.check(order, ledger.snapshot()).code == "MARKET_STATUS_UNKNOWN"
+    gate.observe(StatusEvent(**event_fields("known", STOCK), status="open"))
+    gate.observe(state_event(STOCK, "10"))
+    assert gate.check(order, ledger.snapshot()).accepted
+    gate.observe(state_event(STOCK, "10", trading_day=date(2026, 1, 5)))
+    assert gate.check(order, ledger.snapshot()).code == "MARKET_STATUS_UNKNOWN"
 
 
 def specs():
