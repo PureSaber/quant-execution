@@ -79,9 +79,9 @@ def resolve_a_share_replay_status(
     *,
     listed: bool,
     delisted: bool,
-    tradable: bool,
-    limit_up: bool,
-    limit_down: bool,
+    tradable: bool | None,
+    limit_up: bool | None,
+    limit_down: bool | None,
 ) -> str:
     """Map complete point-in-time A-share flags to one QExec market status.
 
@@ -96,8 +96,10 @@ def resolve_a_share_replay_status(
         "limit_up": limit_up,
         "limit_down": limit_down,
     }
-    if any(type(value) is not bool for value in flags.values()):
+    if any(value is not None and type(value) is not bool for value in flags.values()):
         raise ValidationError("A-share replay status flags must be booleans")
+    if any(value is None for value in flags.values()):
+        return "unknown"
     if delisted and listed:
         raise ValidationError("a delisted instrument cannot remain listed")
     if not listed and (tradable or limit_up or limit_down):
@@ -418,7 +420,12 @@ class RuleBookRiskGate:
 
     def observe(self, event: MarketEvent) -> None:
         prior = self._states.get(event.instrument_id)
+        spec = self.instruments.get(event.instrument_id)
+        strict = spec is not None and spec.metadata.get("requires_status_evidence") == "true"
+        same_day = prior is not None and prior.event.trading_day == event.trading_day
         status = prior.status if prior is not None else "open"
+        if strict and not same_day:
+            status = "unknown"
         reference = prior.reference_price if prior is not None else None
         if isinstance(event, StatusEvent):
             status = event.status.lower()
@@ -538,6 +545,8 @@ class RuleBookRiskGate:
             spec.effective_to is not None and as_of >= spec.effective_to
         ):
             return RiskDecision(False, "INSTRUMENT_INACTIVE", "instrument lifecycle is inactive")
+        if state.status in {"unknown", "no_restriction"}:
+            return RiskDecision(False, "MARKET_STATUS_UNKNOWN", state.status)
         if state.status in {"halted", "suspended", "closed"}:
             return RiskDecision(False, "MARKET_NOT_TRADABLE", state.status)
         if state.status == "limit_up" and order_intent.side is Side.BUY:

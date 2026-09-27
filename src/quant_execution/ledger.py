@@ -802,6 +802,12 @@ class ExactAccountLedger:
         rounded_maintenance = fixed(maintenance_margin, self.money_scale)
         return rounded_maintenance.units > 0 and rounded_nav.units <= rounded_maintenance.units
 
+    def apply_corporate_action(self, action, *, at):
+        """Apply evidenced cross-market terms atomically without synthetic trades."""
+        from quant_execution.corporate_actions import apply_action
+
+        return apply_action(self, action, at=at)
+
     def apply(self, event: LedgerEvent, *, create_snapshot: bool = True) -> AccountSnapshot | None:
         trading_day = event.event_time.date() if isinstance(event, Fill) else None
         return self._apply(
