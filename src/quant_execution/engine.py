@@ -211,6 +211,27 @@ class DeterministicRunEngine:
         self.stored_artifacts: StoredRunArtifacts | None = None
         self._active_sink: ArrowReplayArtifactSink | None = None
 
+    def replay_segments(self, segments: Iterable[Iterable[MarketEvent]], seed: int) -> RunResult:
+        """Replay chronological OOS segments in ONE account and strategy lifecycle.
+
+        Fold boundaries do not reset cash, lots, receivables, broker orders, risk
+        reservations, or strategy latches. This is a batch continuous replay, not
+        a persisted checkpoint/restart API. Segments may not overlap in time.
+        """
+        validated = []
+        previous = None
+        for segment in segments:
+            events = self._validated_events(segment)
+            if not events or previous is not None and events[0].available_at <= previous:
+                raise ValidationError(
+                    "continuous segments must be nonempty and strictly chronological"
+                )
+            previous = events[-1].available_at
+            validated.append(events)
+        if not validated:
+            raise ValidationError("at least one continuous segment required")
+        return self.replay(chain.from_iterable(validated), seed=seed)
+
     def replay(self, event_stream: Iterable[MarketEvent], seed: int) -> RunResult:
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise ValidationError("seed must be a non-negative integer")

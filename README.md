@@ -1,5 +1,7 @@
 # quant-execution
 
+研究可信度升级：接口、使用示例、验收及限制见 [11–20 使用说明](docs/CONTINUOUS_REPLAY.md)。
+
 Hong Kong daily cash-equity research is available through
 `quant_execution.hong_kong.HKDailyExecution`: explicit board lots, dated and
 individually rounded fees, same-day sales, T+2 proceeds restrictions and the
