@@ -11,6 +11,13 @@ matching; the generic rule book rejects XHKG/HKEX/SEHK securities instead of
 silently routing them to A-share rules. See `PureSaber/quant-hk-equity` for the
 research recipe and evidence limitations.
 
+`HKDailyExecution` also accepts the exact ledger's optional `dividend_execution_mode`,
+`fx_valuation_mode`, and `entitlement_evidence_verifier` constructor arguments. Defaults
+retain legacy behavior. An explicit dividend mode requires `EVIDENCED_PIT`; production
+mode also requires a trusted verifier. The caller schedules lifecycle facts through
+`account.ledger`; this constructor does not infer event times or certify source data.
+Dividend receivables and foreign cash can affect NAV without becoming spendable HKD.
+
 Deterministic execution, matching, risk hooks, and multi-currency ledger contracts for
 PureSaber quantitative research, backtesting, and paper trading.
 

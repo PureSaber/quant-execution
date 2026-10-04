@@ -15,6 +15,11 @@ from quant_data_kit import AssetClass, FixedPoint, InstrumentSpec, MarkPriceEven
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution.contracts import Fee, Fill, Side
+from quant_execution.dividends import (
+    DividendExecutionMode,
+    EntitlementEvidenceVerifier,
+    FxValuationMode,
+)
 from quant_execution.ledger import ExactAccountLedger
 
 
@@ -93,6 +98,9 @@ class HKDailyExecution:
         opened_at: datetime,
         fees: HKFeeSchedule,
         settlement_days: list[date],
+        dividend_execution_mode: DividendExecutionMode | None = None,
+        fx_valuation_mode: FxValuationMode = FxValuationMode.LEGACY,
+        entitlement_evidence_verifier: EntitlementEvidenceVerifier | None = None,
     ):
         if not instruments or initial_cash.to_decimal() <= 0:
             raise ValueError("HK execution needs instruments and positive capital")
@@ -118,6 +126,9 @@ class HKDailyExecution:
             initial_cash={"HKD": initial_cash},
             money_scale=8,
             opened_at=opened_at,
+            dividend_execution_mode=dividend_execution_mode,
+            fx_valuation_mode=fx_valuation_mode,
+            entitlement_evidence_verifier=entitlement_evidence_verifier,
         )
         self.pending: list[tuple[date, Decimal]] = []
         self.executed: dict[str, tuple[tuple, Fill, dict]] = {}
