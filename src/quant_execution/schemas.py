@@ -26,6 +26,7 @@ from quant_execution.contracts import (
     RunResult,
     Settlement,
 )
+from quant_execution.dividends import DIVIDEND_RECORD_SCHEMA_ID, DividendRecord
 
 LEGACY_SCHEMA_VERSION = "1.0.0"
 SCHEMA_VERSION = "1.1.0"
@@ -205,6 +206,13 @@ _ARROW_SCHEMAS_BY_VERSION: dict[str, dict[str, pa.Schema]] = {
         ),
     },
 }
+_ARROW_SCHEMAS[DIVIDEND_RECORD_SCHEMA_ID] = pa.schema(
+    [
+        pa.field("schema", pa.string(), nullable=False),
+        pa.field("record_kind", pa.string(), nullable=False),
+        pa.field("payload", pa.large_string(), nullable=False),
+    ]
+)
 
 _FIXED_POINT_JSON = {
     "type": "object",
@@ -488,6 +496,113 @@ _JSON_SCHEMAS[ORDER_EVENT_SCHEMA_ID]["allOf"] = [
 
 _LEGACY_JSON_SCHEMAS = deepcopy(_JSON_SCHEMAS)
 del _LEGACY_JSON_SCHEMAS[SETTLEMENT_SCHEMA_ID]["properties"]["settlement_price"]
+_JSON_SCHEMAS[DIVIDEND_RECORD_SCHEMA_ID] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+        _object_schema(
+            {
+                "schema": {"const": DIVIDEND_RECORD_SCHEMA_ID},
+                "record_kind": {"const": "phase_application"},
+                "account_id": _TEXT,
+                "dividend_id": _TEXT,
+                "instrument_id": _TEXT,
+                "phase": {"enum": ["entitlement", "issuer_conversion", "payment"]},
+                "phase_event_id": _TEXT,
+                "cutoff": _UTC_JSON,
+                "economic_effective_at": _UTC_JSON,
+                "available_at": _UTC_JSON,
+                "applied_at": _UTC_JSON,
+                "lifecycle_snapshot": {"type": "object"},
+                "lifecycle_snapshot_sha256": _SHA256,
+                "phase_fingerprint": _SHA256,
+                "parent_state_sha256": _SHA256,
+                "resulting_state_sha256": _SHA256,
+                "execution_mode": {"enum": ["scenario_only", "production_certified"]},
+                "fx_valuation_mode": {"const": "evidenced_pit"},
+                "entitlement_basis": {"type": ["object", "null"]},
+                "issuer_conversion_audit": {"type": ["object", "null"]},
+                "transaction_ids": {"type": "array", "items": _TEXT},
+                "operation_sequence": {"type": "integer", "minimum": 0},
+                "transaction_count_before": {"type": "integer", "minimum": 0},
+                "transaction_count_after": {"type": "integer", "minimum": 0},
+            },
+            [
+                "schema",
+                "record_kind",
+                "account_id",
+                "dividend_id",
+                "instrument_id",
+                "phase",
+                "phase_event_id",
+                "cutoff",
+                "economic_effective_at",
+                "available_at",
+                "applied_at",
+                "lifecycle_snapshot",
+                "lifecycle_snapshot_sha256",
+                "phase_fingerprint",
+                "parent_state_sha256",
+                "resulting_state_sha256",
+                "execution_mode",
+                "fx_valuation_mode",
+                "entitlement_basis",
+                "issuer_conversion_audit",
+                "transaction_ids",
+                "operation_sequence",
+                "transaction_count_before",
+                "transaction_count_after",
+            ],
+        ),
+        _object_schema(
+            {
+                "schema": {"const": DIVIDEND_RECORD_SCHEMA_ID},
+                "record_kind": {"const": "pit_fx_observation"},
+                "observation_sequence": {"type": "integer", "minimum": 0},
+                "rate_payload": {"type": "object"},
+                "rate_fingerprint": _SHA256,
+                "operation_sequence": {"type": "integer", "minimum": 0},
+                "transaction_count": {"type": "integer", "minimum": 0},
+            },
+            [
+                "schema",
+                "record_kind",
+                "observation_sequence",
+                "rate_payload",
+                "rate_fingerprint",
+                "operation_sequence",
+                "transaction_count",
+            ],
+        ),
+        _object_schema(
+            {
+                "schema": {"const": DIVIDEND_RECORD_SCHEMA_ID},
+                "record_kind": {"const": "valuation"},
+                "valuation_idempotency_key": _TEXT,
+                "as_of": _UTC_JSON,
+                "execution_mode": {"enum": ["scenario_only", "production_certified"]},
+                "fx_valuation_mode": {"const": "evidenced_pit"},
+                "selected_rates": {"type": "array", "items": {"type": "object"}},
+                "result_payload": {"type": "object"},
+                "result_sha256": _SHA256,
+                "operation_sequence": {"type": "integer", "minimum": 0},
+                "transaction_count": {"type": "integer", "minimum": 0},
+            },
+            [
+                "schema",
+                "record_kind",
+                "valuation_idempotency_key",
+                "as_of",
+                "execution_mode",
+                "fx_valuation_mode",
+                "selected_rates",
+                "result_payload",
+                "result_sha256",
+                "operation_sequence",
+                "transaction_count",
+            ],
+        ),
+    ],
+}
 _JSON_SCHEMAS_BY_VERSION: dict[str, dict[str, dict[str, Any]]] = {
     LEGACY_SCHEMA_VERSION: _LEGACY_JSON_SCHEMAS,
     SCHEMA_VERSION: _JSON_SCHEMAS,
@@ -536,6 +651,10 @@ def _fixed_map(values: Mapping[str, FixedPoint]) -> dict[str, dict[str, int]]:
 def execution_payload(value: object, *, version: str = SCHEMA_VERSION) -> dict[str, Any]:
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValidationError(f"Unsupported execution schema version: {version}")
+    if isinstance(value, DividendRecord):
+        if version == LEGACY_SCHEMA_VERSION:
+            raise ValidationError("dividend records require execution schema version 1.1.0")
+        return value.to_dict()
     if isinstance(value, OrderIntent):
         return _intent_payload(value)
     if isinstance(value, Order):

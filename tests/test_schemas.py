@@ -10,6 +10,7 @@ from conftest import T0, fp
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution.contracts import Fee, Settlement
+from quant_execution.dividends import DIVIDEND_RECORD_SCHEMA_ID
 from quant_execution.schemas import (
     FEE_SCHEMA_ID,
     FILL_SCHEMA_ID,
@@ -172,3 +173,25 @@ def test_json_contract_rejects_illegal_transition_and_unbalanced_ledger() -> Non
     unbalanced["postings"][1]["amount"]["units"] = 9999
     with pytest.raises(ValidationError, match="unbalanced"):
         validate_json_record(LEDGER_TRANSACTION_SCHEMA_ID, unbalanced)
+
+
+def test_dividend_record_schema_round_trips_new_golden_without_changing_legacy_set() -> None:
+    path = Path(__file__).parent / "golden" / "v1_1" / "dividend_record.json"
+    golden = json.loads(path.read_text(encoding="utf-8"))
+    record = golden["record"]
+
+    validate_json_record(DIVIDEND_RECORD_SCHEMA_ID, record, golden["schema_version"])
+    with pytest.raises(ValidationError, match="Unknown execution schema ID"):
+        get_json_schema(DIVIDEND_RECORD_SCHEMA_ID, LEGACY_SCHEMA_VERSION)
+    schema = get_arrow_schema(DIVIDEND_RECORD_SCHEMA_ID, SCHEMA_VERSION)
+    table = pa.Table.from_pylist(
+        [
+            {
+                "schema": record["schema"],
+                "record_kind": record["record_kind"],
+                "payload": json.dumps(record, sort_keys=True, separators=(",", ":")),
+            }
+        ],
+        schema=schema,
+    )
+    validate_arrow_table(DIVIDEND_RECORD_SCHEMA_ID, table, SCHEMA_VERSION)

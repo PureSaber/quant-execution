@@ -132,6 +132,24 @@ cash-per-share amount or receivable total, while a registered zero-holding entit
 valid zero-effect lifecycle event. Missing payment dates must be rejected by the upstream
 corporate-action bridge.
 
+The independent evidence-bound dividend lifecycle uses explicit entitlement, issuer-conversion,
+and payment phases under `EVIDENCED_PIT` valuation. Issuer conversion posts the issuer's published
+payment amount; the published rate and amount are retained with an exact rational difference and
+an `unverified_no_rounding_contract` relationship status because the source contract does not
+define how those two printed values were rounded. No tolerance or inferred rounding mode is used.
+Scenario execution makes no external-certification claim. Production execution verifies the
+entitlement basis, verifies a payment policy when it first affects an amount, and separately
+verifies the actual payment. Manifest `trusted_verification_scope` lists only those checked facts;
+`market_admission_certified` remains false because this module does not assess complete market
+admission.
+
+Manifest `1.1.0` dividend exports seal one ledger snapshot before writing. Opening positions,
+external cash, marks, ordinary ledger events, PIT FX observations, valuations, and dividend phases
+share one ordered operation sequence. Replay applies those business facts in order and uses final
+marks, lots, balances, lifecycle state, transactions, NAV, and journal only as comparison targets.
+All public dividend records recursively own immutable nested values, while `to_dict()` returns a
+fresh mutable copy.
+
 ## Deterministic replay
 
 `DeterministicRunEngine.replay` sorts by availability/event time and stable stream
