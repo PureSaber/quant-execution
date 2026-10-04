@@ -34,7 +34,7 @@ from quant_execution._fixed import (
     decimal,
     decimal_fraction,
     fixed,
-    fraction_decimal_exact,
+    fixed_fraction_half_even,
     multiply_decimal_exact,
     sum_decimal_exact,
 )
@@ -840,16 +840,12 @@ class ExactAccountLedger:
         initial_margin = Decimal(0)
         for instrument_id, quantity in self._positions.items():
             spec = self._spec(instrument_id)
-            average = self._average_cost(instrument_id)
-            mark = self._mark_price(instrument_id, fallback=average)
-            multiplier = decimal(spec.contract_multiplier)
+            notional, pnl = self._position_valuation(instrument_id, quantity)
             if self._is_derivative(spec):
                 nav = add_decimal_exact(
                     nav,
                     self._convert_for_valuation(
-                        self._product_for_valuation(
-                            self._difference_for_valuation(mark, average), quantity, multiplier
-                        ),
+                        pnl,
                         spec.settlement_currency,
                         event_time,
                     ),
@@ -858,7 +854,7 @@ class ExactAccountLedger:
                     initial_margin,
                     self._convert_for_valuation(
                         self._product_for_valuation(
-                            self._product_for_valuation(mark, quantity, multiplier).copy_abs(),
+                            notional.copy_abs(),
                             _meta_decimal(spec, "initial_margin_rate"),
                         ),
                         spec.settlement_currency,
@@ -869,7 +865,7 @@ class ExactAccountLedger:
                 nav = add_decimal_exact(
                     nav,
                     self._convert_for_valuation(
-                        self._product_for_valuation(mark, quantity, multiplier),
+                        notional,
                         spec.settlement_currency,
                         event_time,
                     ),
@@ -909,7 +905,7 @@ class ExactAccountLedger:
                         raise ValidationError(
                             f"InstrumentSpec metadata {key!r} is required for risk snapshot"
                         )
-                absolute_notional = abs(local_notional)
+                absolute_notional = local_notional.copy_abs()
                 position_initial = self._convert_for_valuation(
                     self._product_for_valuation(
                         absolute_notional, _meta_decimal(spec, "initial_margin_rate")
@@ -1092,18 +1088,12 @@ class ExactAccountLedger:
         maintenance_margin = Decimal(0)
         for instrument_id, quantity in self._positions.items():
             spec = self._spec(instrument_id)
-            average = self._average_cost(instrument_id)
-            mark = self._mark_price(instrument_id, fallback=average)
-            multiplier = decimal(spec.contract_multiplier)
+            notional, pnl = self._position_valuation(instrument_id, quantity)
             if self._is_derivative(spec):
                 nav = add_decimal_exact(
                     nav,
                     self._convert_for_valuation(
-                        self._product_for_valuation(
-                            self._difference_for_valuation(mark, average),
-                            quantity,
-                            multiplier,
-                        ),
+                        pnl,
                         spec.settlement_currency,
                         at,
                     ),
@@ -1112,7 +1102,7 @@ class ExactAccountLedger:
                     maintenance_margin,
                     self._convert_for_valuation(
                         self._product_for_valuation(
-                            self._product_for_valuation(mark, quantity, multiplier).copy_abs(),
+                            notional.copy_abs(),
                             _meta_decimal(spec, "maintenance_margin_rate"),
                         ),
                         spec.settlement_currency,
@@ -1123,7 +1113,7 @@ class ExactAccountLedger:
                 nav = add_decimal_exact(
                     nav,
                     self._convert_for_valuation(
-                        self._product_for_valuation(mark, quantity, multiplier),
+                        notional,
                         spec.settlement_currency,
                         at,
                     ),
@@ -1475,11 +1465,7 @@ class ExactAccountLedger:
         if quantity == 0:
             return None
         settlement_price = self._mark_price(event.instrument_id)
-        amount = (
-            (settlement_price - self._average_cost(event.instrument_id))
-            * quantity
-            * decimal(spec.contract_multiplier)
-        )
+        _, amount = self._position_valuation(event.instrument_id, quantity, mark=settlement_price)
         return Settlement(
             settlement_id=_identifier("settlement", event.event_id, self.account_id),
             account_id=self.account_id,
@@ -1533,11 +1519,7 @@ class ExactAccountLedger:
                 self._convert_for_valuation(realized_value, spec.settlement_currency, at),
                 self.money_scale,
             )
-            mark = self._mark_price(instrument_id, fallback=average)
-            multiplier = decimal(spec.contract_multiplier)
-            pnl = self._product_for_valuation(
-                self._difference_for_valuation(mark, average), quantity, multiplier
-            )
+            notional, pnl = self._position_valuation(instrument_id, quantity)
             unrealized[instrument_id] = self._fixed_for_valuation(
                 self._convert_for_valuation(pnl, spec.settlement_currency, at),
                 self.money_scale,
@@ -1546,7 +1528,7 @@ class ExactAccountLedger:
                 nav = add_decimal_exact(
                     nav, self._convert_for_valuation(pnl, spec.settlement_currency, at)
                 )
-                notional = self._product_for_valuation(mark, quantity, multiplier).copy_abs()
+                notional = notional.copy_abs()
                 initial_margin = add_decimal_exact(
                     initial_margin,
                     self._convert_for_valuation(
@@ -1571,7 +1553,7 @@ class ExactAccountLedger:
                 nav = add_decimal_exact(
                     nav,
                     self._convert_for_valuation(
-                        self._product_for_valuation(mark, quantity, multiplier),
+                        notional,
                         spec.settlement_currency,
                         at,
                     ),
@@ -1607,16 +1589,8 @@ class ExactAccountLedger:
         for instrument_id, quantity_fp in snapshot.positions.items():
             spec = self._spec(instrument_id)
             quantity = decimal(quantity_fp)
-            mark = self._mark_price(instrument_id, fallback=self._average_cost(instrument_id))
-            multiplier = decimal(spec.contract_multiplier)
-            if self._is_derivative(spec):
-                component = self._product_for_valuation(
-                    self._difference_for_valuation(mark, self._average_cost(instrument_id)),
-                    quantity,
-                    multiplier,
-                )
-            else:
-                component = self._product_for_valuation(mark, quantity, multiplier)
+            notional, pnl = self._position_valuation(instrument_id, quantity)
+            component = pnl if self._is_derivative(spec) else notional
             expected = add_decimal_exact(
                 expected, self._convert_for_valuation(component, spec.settlement_currency, at)
             )
@@ -1810,30 +1784,47 @@ class ExactAccountLedger:
         if fill_event.account_id != self.account_id:
             raise ValidationError("fill account differs from ledger account")
         spec = self._spec(fill_event.instrument_id)
+        pit = self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT
         quantity = decimal(fill_event.quantity)
-        signed_quantity = quantity if fill_event.side is Side.BUY else -quantity
+        signed_quantity = quantity if fill_event.side is Side.BUY else quantity.copy_negate()
         old_quantity = self._positions.get(fill_event.instrument_id, Decimal(0))
         multiplier = decimal(spec.contract_multiplier)
         price = decimal(fill_event.price)
-        notional = quantity * price * multiplier
+        notional = self._product_for_valuation(quantity, price, multiplier)
         close_quantity = (
-            min(abs(old_quantity), quantity)
-            if old_quantity and old_quantity * signed_quantity < 0
+            min(old_quantity.copy_abs(), quantity)
+            if old_quantity and (old_quantity > 0) != (signed_quantity > 0)
             else Decimal(0)
         )
         derivative = fill_event.instrument_id in self._derivative_instruments
         average = (
             self._average_cost(fill_event.instrument_id)
-            if close_quantity or (not derivative and fill_event.side is Side.SELL)
+            if not pit and (close_quantity or (not derivative and fill_event.side is Side.SELL))
+            else Decimal(0)
+        )
+        allocated_cost = (
+            self._allocated_position_cost(fill_event.instrument_id, close_quantity)
+            if pit and close_quantity
             else Decimal(0)
         )
         realized = Decimal(0)
         if close_quantity:
-            realized = (
-                (price - average) * close_quantity * multiplier
-                if old_quantity > 0
-                else (average - price) * close_quantity * multiplier
-            )
+            if pit:
+                close_notional = decimal(
+                    fixed(
+                        multiply_decimal_exact(price, close_quantity, multiplier), self.money_scale
+                    )
+                )
+                realized = add_decimal_exact(
+                    close_notional if old_quantity > 0 else close_notional.copy_negate(),
+                    allocated_cost.copy_negate(),
+                )
+            else:
+                realized = (
+                    (price - average) * close_quantity * multiplier
+                    if old_quantity > 0
+                    else (average - price) * close_quantity * multiplier
+                )
         postings: list[Posting] = []
         if derivative:
             if realized:
@@ -1843,24 +1834,32 @@ class ExactAccountLedger:
                         self._posting(
                             "income:realized_pnl",
                             spec.settlement_currency,
-                            -realized,
+                            realized.copy_negate(),
                             instrument_id=fill_event.instrument_id,
                         ),
                     ]
                 )
             old_cost = self._position_cost(fill_event.instrument_id, derivative=True)
-            new_quantity = old_quantity + signed_quantity
-            if old_quantity == 0 or old_quantity * signed_quantity > 0:
-                new_cost = old_cost + signed_quantity * price * multiplier
+            new_quantity = self._difference_for_valuation(
+                old_quantity, signed_quantity.copy_negate()
+            )
+            if old_quantity == 0 or (old_quantity > 0) == (signed_quantity > 0):
+                new_cost = self._difference_for_valuation(
+                    old_cost,
+                    self._product_for_valuation(signed_quantity, price, multiplier).copy_negate(),
+                )
             elif new_quantity == 0:
                 new_cost = Decimal(0)
-            elif old_quantity * new_quantity > 0:
-                new_cost = (average * abs(new_quantity) * multiplier) * (
-                    Decimal(1) if new_quantity > 0 else Decimal(-1)
+            elif (old_quantity > 0) == (new_quantity > 0):
+                new_cost = (
+                    add_decimal_exact(old_cost, allocated_cost.copy_negate())
+                    if pit
+                    else (average * abs(new_quantity) * multiplier)
+                    * (Decimal(1) if new_quantity > 0 else Decimal(-1))
                 )
             else:
-                new_cost = new_quantity * price * multiplier
-            cost_delta = new_cost - old_cost
+                new_cost = self._product_for_valuation(new_quantity, price, multiplier)
+            cost_delta = self._difference_for_valuation(new_cost, old_cost)
             postings.extend(
                 [
                     self._posting(
@@ -1872,13 +1871,13 @@ class ExactAccountLedger:
                     self._posting(
                         "memo:position_cost_counter",
                         spec.settlement_currency,
-                        -cost_delta,
+                        cost_delta.copy_negate(),
                         instrument_id=fill_event.instrument_id,
                     ),
                 ]
             )
         else:
-            if old_quantity + signed_quantity < 0:
+            if old_quantity < quantity and fill_event.side is Side.SELL:
                 raise ValidationError("cash asset fill would create a short position")
             if fill_event.side is Side.BUY:
                 cash = self._accounts.get(
@@ -1888,7 +1887,9 @@ class ExactAccountLedger:
                     raise ValidationError("cash asset fill would create negative cash")
                 postings.extend(
                     [
-                        self._posting("assets:cash", spec.settlement_currency, -notional),
+                        self._posting(
+                            "assets:cash", spec.settlement_currency, notional.copy_negate()
+                        ),
                         self._posting(
                             "assets:position_cost",
                             spec.settlement_currency,
@@ -1902,20 +1903,24 @@ class ExactAccountLedger:
                 # their difference can leave a one-unit imbalance for fractional
                 # equity fills. P&L is the exact residual of the posted amounts.
                 notional = decimal(fixed(notional, self.money_scale))
-                cost_removed = decimal(fixed(average * quantity * multiplier, self.money_scale))
+                cost_removed = (
+                    allocated_cost
+                    if pit
+                    else decimal(fixed(average * quantity * multiplier, self.money_scale))
+                )
                 postings.extend(
                     [
                         self._posting("assets:cash", spec.settlement_currency, notional),
                         self._posting(
                             "assets:position_cost",
                             spec.settlement_currency,
-                            -cost_removed,
+                            cost_removed.copy_negate(),
                             instrument_id=fill_event.instrument_id,
                         ),
                         self._posting(
                             "income:realized_pnl",
                             spec.settlement_currency,
-                            -(notional - cost_removed),
+                            self._difference_for_valuation(notional, cost_removed).copy_negate(),
                             instrument_id=fill_event.instrument_id,
                         ),
                     ]
@@ -1935,7 +1940,7 @@ class ExactAccountLedger:
                     spec.settlement_currency,
                     Decimal(0),
                     instrument_id=fill_event.instrument_id,
-                    quantity_delta=-signed_quantity,
+                    quantity_delta=signed_quantity.copy_negate(),
                     quantity_scale=fill_event.quantity.scale,
                 ),
             ]
@@ -1992,16 +1997,15 @@ class ExactAccountLedger:
         quantity = self._positions.get(event.instrument_id, Decimal(0))
         multiplier = decimal(spec.contract_multiplier)
         settlement_price = self._settlement_price(event)
-        average = self._average_cost(event.instrument_id)
-        expected = (settlement_price - average) * quantity * multiplier
+        _, expected = self._position_valuation(event.instrument_id, quantity, mark=settlement_price)
         rounded_expected = fixed(expected, self.money_scale).to_decimal()
         if decimal(event.amount) != rounded_expected:
             raise ValidationError(
                 "daily_mark amount differs from mark-to-market PnL at settlement_price"
             )
         old_cost = self._position_cost(event.instrument_id, derivative=True)
-        new_cost = quantity * settlement_price * multiplier
-        cost_delta = new_cost - old_cost
+        new_cost = self._product_for_valuation(quantity, settlement_price, multiplier)
+        cost_delta = self._difference_for_valuation(new_cost, old_cost)
         amount = decimal(event.amount)
         return self._make_transaction(
             event_type=LedgerEventType.SETTLEMENT,
@@ -2013,7 +2017,7 @@ class ExactAccountLedger:
                 self._posting(
                     "income:settlement:daily_mark",
                     event.currency,
-                    -amount,
+                    amount.copy_negate(),
                     instrument_id=event.instrument_id,
                 ),
                 self._posting(
@@ -2025,7 +2029,7 @@ class ExactAccountLedger:
                 self._posting(
                     "memo:position_cost_counter",
                     event.currency,
-                    -cost_delta,
+                    cost_delta.copy_negate(),
                     instrument_id=event.instrument_id,
                 ),
             ),
@@ -2344,12 +2348,47 @@ class ExactAccountLedger:
         spec = self._spec(instrument_id)
         cost = self._position_cost(instrument_id, derivative=self._is_derivative(spec))
         if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
-            return fraction_decimal_exact(
-                decimal_fraction(cost.copy_abs())
-                / decimal_fraction(quantity.copy_abs())
-                / decimal_fraction(spec.contract_multiplier)
+            # A reporting price, never an input to PIT valuation or cost removal.
+            return decimal(
+                fixed_fraction_half_even(
+                    decimal_fraction(cost.copy_abs())
+                    / decimal_fraction(quantity.copy_abs())
+                    / decimal_fraction(spec.contract_multiplier),
+                    spec.price_tick.scale,
+                )
             )
         return abs(cost) / (abs(quantity) * decimal(spec.contract_multiplier))
+
+    def _position_valuation(
+        self, instrument_id: str, quantity: Decimal, *, mark: Decimal | None = None
+    ) -> tuple[Decimal, Decimal]:
+        """Return signed notional and P&L without rounding a PIT unit cost."""
+        spec = self._spec(instrument_id)
+        multiplier = decimal(spec.contract_multiplier)
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
+            cost = self._position_cost(instrument_id, derivative=self._is_derivative(spec))
+            if mark is None and instrument_id in self._marks:
+                mark = self._marks[instrument_id][0]
+            # Preserve the existing unmarked-at-book-cost valuation convention,
+            # using its exact total rather than a rounded implied price.
+            notional = cost if mark is None else multiply_decimal_exact(mark, quantity, multiplier)
+            return notional, add_decimal_exact(notional, cost.copy_negate())
+        average = self._average_cost(instrument_id)
+        if mark is None:
+            mark = self._mark_price(instrument_id, fallback=average)
+        return mark * quantity * multiplier, (mark - average) * quantity * multiplier
+
+    def _allocated_position_cost(self, instrument_id: str, quantity: Decimal) -> Decimal:
+        """Allocate the posted cost once; full closure consumes the entire residue."""
+        spec = self._spec(instrument_id)
+        cost = self._position_cost(instrument_id, derivative=self._is_derivative(spec))
+        held = self._positions[instrument_id].copy_abs()
+        return decimal(
+            fixed_fraction_half_even(
+                decimal_fraction(cost) * decimal_fraction(quantity) / decimal_fraction(held),
+                self.money_scale,
+            )
+        )
 
     def _realized(self, instrument_id: str) -> Decimal:
         spec = self._spec(instrument_id)
