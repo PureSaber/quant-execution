@@ -29,7 +29,7 @@ from quant_data_kit import (
 )
 from quant_data_kit.exceptions import ValidationError
 
-from quant_execution._fixed import decimal, fixed
+from quant_execution._fixed import add_decimal_exact, decimal, fixed
 from quant_execution._json import fixed_token, flat_sequence_bytes, string_token, utc_token
 from quant_execution.artifacts import (
     fee_bytes,
@@ -1822,16 +1822,19 @@ class ExactAccountLedger:
         if not local_rollback:
             for posting in transaction.postings:
                 key = (posting.ledger_account, posting.currency, posting.instrument_id)
-                self._accounts[key] = self._accounts.get(key, Decimal(0)) + decimal(posting.amount)
+                self._accounts[key] = add_decimal_exact(
+                    self._accounts.get(key, Decimal(0)), decimal(posting.amount)
+                )
                 if (
                     posting.ledger_account == "assets:position"
                     and posting.instrument_id is not None
                     and posting.quantity_delta is not None
                 ):
                     instrument_id = posting.instrument_id
-                    self._positions[instrument_id] = self._positions.get(
-                        instrument_id, Decimal(0)
-                    ) + decimal(posting.quantity_delta)
+                    self._positions[instrument_id] = add_decimal_exact(
+                        self._positions.get(instrument_id, Decimal(0)),
+                        decimal(posting.quantity_delta),
+                    )
             if self._artifact_sink is None:
                 self._transactions.append(transaction)
             else:
@@ -1849,7 +1852,9 @@ class ExactAccountLedger:
             for posting in transaction.postings:
                 key = (posting.ledger_account, posting.currency, posting.instrument_id)
                 prior_accounts.setdefault(key, self._accounts.get(key, missing))
-                self._accounts[key] = self._accounts.get(key, Decimal(0)) + decimal(posting.amount)
+                self._accounts[key] = add_decimal_exact(
+                    self._accounts.get(key, Decimal(0)), decimal(posting.amount)
+                )
                 if (
                     posting.ledger_account == "assets:position"
                     and posting.instrument_id is not None
@@ -1859,9 +1864,10 @@ class ExactAccountLedger:
                     prior_positions.setdefault(
                         instrument_id, self._positions.get(instrument_id, missing)
                     )
-                    self._positions[instrument_id] = self._positions.get(
-                        instrument_id, Decimal(0)
-                    ) + decimal(posting.quantity_delta)
+                    self._positions[instrument_id] = add_decimal_exact(
+                        self._positions.get(instrument_id, Decimal(0)),
+                        decimal(posting.quantity_delta),
+                    )
             if self._artifact_sink is None:
                 self._transactions.append(transaction)
             else:

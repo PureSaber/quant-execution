@@ -3,34 +3,49 @@
 from __future__ import annotations
 
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
-from functools import lru_cache
 
 from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
 
 
-@lru_cache(maxsize=8192)
 def decimal(value: FixedPoint) -> Decimal:
     if not isinstance(value, FixedPoint):
         raise ValidationError("value must be a FixedPoint")
     return value.to_decimal()
 
 
-@lru_cache(maxsize=8192)
 def fixed(
     value: Decimal | int | str,
     scale: int,
     *,
     rounding: str | None = ROUND_HALF_EVEN,
 ) -> FixedPoint:
-    decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
-    if not decimal_value.is_finite():
-        raise ValidationError("fixed-point value must be finite")
-    scaled = decimal_value.scaleb(scale)
-    integral = scaled.to_integral_value(rounding=rounding) if rounding else scaled
-    if rounding is None and scaled != scaled.to_integral_value():
-        raise ValidationError(f"value {value!r} is not exact at scale {scale}")
-    return FixedPoint(units=int(integral), scale=scale)
+    return FixedPoint.from_decimal(value, scale, rounding=rounding)
+
+
+def add_decimal_exact(left: Decimal, right: Decimal) -> Decimal:
+    """Add finite decimals exactly without consulting the ambient context."""
+
+    if not isinstance(left, Decimal) or not isinstance(right, Decimal):
+        raise ValidationError("exact decimal addition requires Decimal values")
+    if not left.is_finite() or not right.is_finite():
+        raise ValidationError("exact decimal addition requires finite values")
+
+    left_parts = left.as_tuple()
+    right_parts = right.as_tuple()
+    exponent = min(int(left_parts.exponent), int(right_parts.exponent))
+
+    def aligned(parts) -> int:
+        coefficient = 0
+        for digit in parts.digits:
+            coefficient = coefficient * 10 + digit
+        coefficient *= 10 ** (int(parts.exponent) - exponent)
+        return -coefficient if parts.sign and coefficient else coefficient
+
+    total = aligned(left_parts) + aligned(right_parts)
+    magnitude = abs(total)
+    digits = tuple(int(digit) for digit in str(magnitude)) if magnitude else (0,)
+    return Decimal((int(total < 0), digits, exponent))
 
 
 def floor_to_scale(value: Decimal, scale: int) -> FixedPoint:
