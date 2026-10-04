@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import fp
-from quant_data_kit import MarkPriceEvent
+from quant_data_kit import CorporateActionEvent, MarkPriceEvent, market_event_payload
 from quant_data_kit.exceptions import ValidationError
 from test_dividend_lifecycle import (
     EX_AT,
@@ -31,8 +33,11 @@ from quant_execution.artifacts import (
     load_stored_artifacts,
     replay_dividend_run,
 )
-from quant_execution.contracts import Fill, LiquidityRole, Side
+from quant_execution.contracts import Fee, Fill, Funding, LiquidityRole, Settlement, Side
 from quant_execution.dividends import DividendExecutionMode, DividendExecutionPhase
+from quant_execution.schemas import execution_payload
+
+UTC = timezone.utc
 
 
 def completed_ledger():
@@ -217,6 +222,18 @@ def test_replay_preserves_ordered_marks_fill_valuations_lots_and_payment(
         ),
         create_snapshot=False,
     )
+    account.apply(
+        Fee(
+            fee_id="fee-sell-1",
+            fill_id="sell-1",
+            account_id="account",
+            amount=fp("0.01"),
+            currency="HKD",
+            event_time=EX_AT + timedelta(days=1, hours=2, minutes=1),
+            fee_type="commission",
+        ),
+        create_snapshot=False,
+    )
     account.mark(
         MarkPriceEvent(
             event_id="mark-2",
@@ -286,6 +303,223 @@ def test_export_reads_only_the_sealed_snapshot_after_capture(
 
     assert account.cash_balance("HKD") == expected_cash + fp("1").to_decimal()
     assert replayed.cash_balance("HKD") == expected_cash
+
+
+def test_dividend_replay_payload_parsers_cover_all_supported_event_shapes() -> None:
+    at = EX_AT + timedelta(days=5)
+    fee = Fee(
+        fee_id="fee",
+        fill_id="fill",
+        account_id="account",
+        amount=fp("0.01"),
+        currency="HKD",
+        event_time=at,
+        fee_type="commission",
+    )
+    funding = Funding(
+        funding_id="funding",
+        account_id="account",
+        instrument_id="HK:DIVIDEND",
+        amount=fp("0.10"),
+        currency="HKD",
+        event_time=at,
+    )
+    settlement = Settlement(
+        settlement_id="settlement",
+        account_id="account",
+        instrument_id="HK:DIVIDEND",
+        amount=fp("0.20"),
+        currency="HKD",
+        event_time=at,
+        settlement_type="cash_adjustment",
+        settlement_price=fp("12"),
+    )
+    action = CorporateActionEvent(
+        event_id="action",
+        instrument_id="HK:DIVIDEND",
+        event_time=at,
+        received_at=at,
+        available_at=at,
+        source="issuer",
+        trading_day=at.date(),
+        session_id="session",
+        sequence=1,
+        action_type="split",
+        effective_date=at.date(),
+        ratio=fp("2"),
+    )
+    cash_action = replace(
+        action,
+        event_id="cash-action",
+        action_type="cash_dividend_entitlement",
+        ratio=None,
+        cash_amount=fp("1"),
+        currency="HKD",
+    )
+
+    for kind, event, payload in (
+        ("fee", fee, execution_payload(fee)),
+        ("funding", funding, execution_payload(funding)),
+        ("settlement", settlement, execution_payload(settlement)),
+        ("corporate_action", action, market_event_payload(action)),
+        ("corporate_action", cash_action, market_event_payload(cash_action)),
+    ):
+        assert (
+            artifacts_module._ledger_event_from_business_fact(
+                {"event_kind": kind, "event": payload}
+            )
+            == event
+        )
+
+    no_price = replace(settlement, settlement_id="settlement-no-price", settlement_price=None)
+    assert (
+        artifacts_module._ledger_event_from_business_fact(
+            {"event_kind": "settlement", "event": execution_payload(no_price)}
+        )
+        == no_price
+    )
+
+    rich_spec = replace(
+        ledger().instruments["HK:DIVIDEND"],
+        effective_to=EX_AT + timedelta(days=365),
+        superseded_at=EX_AT + timedelta(days=366),
+        expiry_date=date(2027, 1, 1),
+    )
+    assert (
+        artifacts_module._spec_from_payload(artifacts_module._spec_payload(rich_spec)) == rich_spec
+    )
+
+
+def test_dividend_replay_payload_parsers_reject_malformed_values() -> None:
+    for value, message in (
+        (None, "fixed-point object"),
+        ({"units": True, "scale": 2}, "units must be an integer"),
+        ({"units": 1, "scale": True}, "scale must be an integer"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            artifacts_module._fixed_from_payload(value, "value")
+
+    for value, message in (
+        (None, "ISO-8601 timestamp"),
+        ("not-a-time", "ISO-8601 timestamp"),
+        ("2026-01-01T00:00:00", "timezone-aware"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            artifacts_module._time_from_payload(value, "value")
+
+    with pytest.raises(ValidationError, match="instrument spec replay fact"):
+        artifacts_module._spec_from_payload(None)
+    with pytest.raises(ValidationError, match="ledger transaction replay fact"):
+        artifacts_module._transaction_from_payload(None)
+    with pytest.raises(ValidationError, match="ledger event business fact"):
+        artifacts_module._ledger_event_from_business_fact(None)
+    with pytest.raises(ValidationError, match="ledger event payload"):
+        artifacts_module._ledger_event_from_business_fact({"event_kind": "fee"})
+    with pytest.raises(ValidationError, match="unsupported ledger event"):
+        artifacts_module._ledger_event_from_business_fact({"event_kind": "unknown", "event": {}})
+    with pytest.raises(ValidationError, match="mark business fact must"):
+        artifacts_module._mark_from_business_fact(None)
+    with pytest.raises(ValidationError, match="invalid event type"):
+        artifacts_module._mark_from_business_fact({"event_type": "trade"})
+
+    with pytest.raises(ValidationError, match="explicit execution mode"):
+        artifacts_module._dividend_run_metadata(SimpleNamespace(dividend_execution_mode=None))
+    with pytest.raises(ValidationError, match="requires EVIDENCED_PIT"):
+        artifacts_module._dividend_run_metadata(
+            SimpleNamespace(
+                dividend_execution_mode=DividendExecutionMode.SCENARIO_ONLY,
+                fx_valuation_mode=artifacts_module.FxValuationMode.LEGACY,
+            )
+        )
+    with pytest.raises(ValidationError, match="requires lifecycle records"):
+        artifacts_module._dividend_run_metadata(
+            SimpleNamespace(
+                dividend_execution_mode=DividendExecutionMode.SCENARIO_ONLY,
+                fx_valuation_mode=artifacts_module.FxValuationMode.EVIDENCED_PIT,
+                _dividend_operation_log=[],
+            )
+        )
+    assert (
+        artifacts_module._trusted_verification_scope(
+            SimpleNamespace(
+                dividend_execution_mode=DividendExecutionMode.PRODUCTION_CERTIFIED,
+                _dividend_execution_records=[],
+            )
+        )
+        == []
+    )
+
+
+def _replace_metadata(stored, metadata):
+    unsigned = deepcopy(metadata)
+    unsigned.pop("metadata_sha256", None)
+    metadata["metadata_sha256"] = artifacts_module.hashlib.sha256(
+        artifacts_module.canonical_bytes(unsigned)
+    ).hexdigest()
+    return replace(stored, run_metadata=metadata)
+
+
+def test_replay_rejects_malformed_ordered_business_fact_metadata(tmp_path: Path) -> None:
+    stored = export_dividend_run(completed_ledger(), tmp_path / "business-fact-guards")
+    cases = []
+
+    missing = deepcopy(stored.run_metadata)
+    missing.pop("business_facts")
+    cases.append((missing, "ordered business facts are missing"))
+    wrong_item = deepcopy(stored.run_metadata)
+    wrong_item["business_facts"] = ["not-an-object"]
+    cases.append((wrong_item, "ordered business facts are missing"))
+    invalid_sequence = deepcopy(stored.run_metadata)
+    invalid_sequence["business_facts"][0]["operation_sequence"] = True
+    cases.append((invalid_sequence, "operation sequence is invalid"))
+    noncontiguous = deepcopy(stored.run_metadata)
+    noncontiguous["business_facts"][0]["operation_sequence"] = 99
+    cases.append((noncontiguous, "operation sequence is not contiguous"))
+    malformed = deepcopy(stored.run_metadata)
+    malformed["business_facts"][0]["transaction_count_before"] = True
+    cases.append((malformed, "business fact is malformed"))
+    unsupported = deepcopy(stored.run_metadata)
+    unsupported["business_facts"][0]["kind"] = "unsupported"
+    cases.append((unsupported, "unsupported ordered business fact"))
+
+    for metadata, message in cases:
+        with pytest.raises(ValidationError, match=message):
+            replay_dividend_run(_replace_metadata(stored, metadata))
+
+
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        ("event_time", "event time mismatch"),
+        ("marks", "mark state mismatch"),
+        ("position_lots", "position lots mismatch"),
+        ("transaction_sha256", "transaction sequence hash mismatch"),
+        ("dividend_states", "lifecycle state mismatch"),
+        ("account_snapshot", "account snapshot mismatch"),
+        ("journal_sha256", "journal hash mismatch"),
+    ],
+)
+def test_replay_rejects_tampered_final_comparison_targets(
+    tmp_path: Path,
+    target: str,
+    message: str,
+) -> None:
+    stored = export_dividend_run(completed_ledger(), tmp_path / f"tamper-{target}")
+    metadata = deepcopy(stored.run_metadata)
+    final = metadata["final_facts"]
+    if target == "event_time":
+        final[target] = datetime(2099, 1, 1, tzinfo=UTC).isoformat()
+    elif target in {"marks", "dividend_states"}:
+        final[target] = []
+    elif target == "position_lots":
+        final[target] = {}
+    elif target == "account_snapshot":
+        final[target]["account_id"] = "tampered"
+    else:
+        final[target] = "0" * 64
+
+    with pytest.raises(ValidationError, match=message):
+        replay_dividend_run(_replace_metadata(stored, metadata))
 
 
 def test_manifest_tampering_is_rejected_even_after_outer_hashes_are_recomputed(

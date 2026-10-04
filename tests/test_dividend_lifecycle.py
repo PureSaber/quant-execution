@@ -3,7 +3,18 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, Inexact, Rounded, localcontext
+from decimal import (
+    ROUND_DOWN,
+    ROUND_HALF_EVEN,
+    ROUND_HALF_UP,
+    ROUND_UP,
+    Decimal,
+    Inexact,
+    Rounded,
+    localcontext,
+)
+from fractions import Fraction
+from types import SimpleNamespace
 
 import pytest
 from conftest import fp, spec
@@ -25,6 +36,7 @@ from quant_data_kit.financial import (
     RoundingPolicy,
 )
 
+import quant_execution.dividends as dividends_module
 from quant_execution.contracts import LedgerEventType, LedgerTransaction, Posting
 from quant_execution.dividends import (
     DividendEntitlementBasis,
@@ -441,6 +453,235 @@ def test_public_record_constructors_take_recursive_ownership_of_inputs() -> None
         valuation_record.result_payload["items"][0]["value"] = 3
 
 
+def test_dividend_contract_parsers_and_recursive_values_fail_closed() -> None:
+    frozen = dividends_module._freeze({"items": [{"value": 1}]})
+    assert dividends_module._freeze(frozen) is frozen
+    assert len(frozen) == 1
+    assert repr(frozen)
+    sequence = frozen["items"]
+    assert len(sequence) == 1
+    assert sequence == [{"value": 1}]
+    assert sequence != "not-a-sequence"
+    assert repr(sequence)
+    assert deepcopy(sequence) is sequence
+
+    with pytest.raises(ValidationError, match="non-empty string"):
+        dividends_module._text(" ", "value")
+    with pytest.raises(ValidationError, match="ISO-8601 timestamp"):
+        dividends_module._parse_timestamp(None, "value")
+    for value, message in (
+        (None, "fixed-point object"),
+        ({"units": True, "scale": 1}, "units must be an integer"),
+        ({"units": 1, "scale": True}, "scale must be an integer"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            dividends_module._fixed_from_payload(value, "value")
+
+    with pytest.raises(ValidationError, match="nonnegative FixedPoint"):
+        replace(basis(), entitled_quantity="invalid")
+    with pytest.raises(ValidationError, match="nonnegative FixedPoint"):
+        replace(basis(), entitled_quantity=FixedPoint(-1, 0))
+    with pytest.raises(ValidationError, match="entitlement_basis must be an object"):
+        DividendEntitlementBasis.from_dict(None)
+
+    with pytest.raises(ValidationError, match="lifecycle must be"):
+        DividendExecutionRequest(
+            lifecycle="invalid",
+            phase=DividendExecutionPhase.ENTITLEMENT,
+            cutoff=EX_AT,
+        )
+    with pytest.raises(ValidationError, match="phase must be"):
+        DividendExecutionRequest(
+            lifecycle=lifecycle(),
+            phase="entitlement",
+            cutoff=EX_AT,
+        )
+    with pytest.raises(ValidationError, match="entitlement_basis has an invalid type"):
+        DividendExecutionRequest(
+            lifecycle=lifecycle(),
+            phase=DividendExecutionPhase.ENTITLEMENT,
+            cutoff=EX_AT,
+            entitlement_basis="invalid",
+        )
+
+    account = ledger()
+    phase_record = apply_entitlement(account)
+    state = account._dividend_lifecycle_states[("account", "dividend-ordinary")]
+    for constructor, message in (
+        (dividends_module.DividendLifecycleState.from_dict, "lifecycle state"),
+        (dividends_module.DividendExecutionRecord.from_dict, "execution record"),
+        (dividends_module.PitFxObservationRecord.from_dict, "observation record"),
+        (dividends_module.DividendValuationRecord.from_dict, "valuation record"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            constructor(None)
+    assert dividends_module.DividendLifecycleState.from_dict(state.to_dict()) == state
+    record_payload = phase_record.to_dict()
+    with pytest.raises(ValidationError, match="unsupported dividend record schema"):
+        dividends_module.DividendExecutionRecord.from_dict(
+            {**record_payload, "schema": "unsupported"}
+        )
+    with pytest.raises(ValidationError, match="not a dividend phase application"):
+        dividends_module.DividendExecutionRecord.from_dict(
+            {**record_payload, "record_kind": "valuation"}
+        )
+    with pytest.raises(ValidationError, match="dividend record must be an object"):
+        dividends_module.dividend_record_from_dict(None)
+    with pytest.raises(ValidationError, match="unsupported dividend record kind"):
+        dividends_module.dividend_record_from_dict({"record_kind": "unknown"})
+
+
+def test_exact_dividend_numeric_helpers_cover_rounding_and_overflow_boundaries() -> None:
+    with pytest.raises(ValidationError, match="decimal text"):
+        dividends_module._fraction_text(None, "value")
+    with pytest.raises(ValidationError, match="must be finite"):
+        dividends_module._fraction_text("NaN", "value")
+    with pytest.raises(ValidationError, match="NOT_EXACT"):
+        dividends_module._fixed_exact(Fraction(1, 3), 2, "NOT_EXACT")
+    with pytest.raises(ValidationError, match="FIXED_POINT_OVERFLOW"):
+        dividends_module._fixed_exact(Fraction(2**63), 0, "NOT_EXACT")
+
+    assert dividends_module._round_fraction(Fraction(1, 4), 1, ROUND_DOWN) == Fraction(1, 5)
+    assert dividends_module._round_fraction(Fraction(-1, 4), 1, ROUND_UP) == Fraction(-3, 10)
+    assert dividends_module._round_fraction(Fraction(1, 4), 1, ROUND_HALF_UP) == Fraction(3, 10)
+    assert dividends_module._round_fraction(Fraction(1, 4), 1, ROUND_HALF_EVEN) == Fraction(1, 5)
+    assert dividends_module._round_fraction(Fraction(3, 4), 1, ROUND_HALF_EVEN) == Fraction(4, 5)
+    assert dividends_module._round_fraction(Fraction(1, 2), 1, "unused") == Fraction(1, 2)
+    with pytest.raises(ValidationError, match="unsupported rounding mode"):
+        dividends_module._round_fraction(Fraction(1, 4), 1, "unsupported")
+
+    assert dividends_module._certified_rounding_policy(None, account_id="account") is None
+    with pytest.raises(ValidationError, match="PAYMENT_POLICY_ACCOUNT_MISMATCH"):
+        dividends_module._certified_rounding_policy(
+            SimpleNamespace(account_id="other", certification_status="certified"),
+            account_id="account",
+        )
+    assert (
+        dividends_module._certified_rounding_policy(
+            SimpleNamespace(account_id="account", certification_status="unverified"),
+            account_id="account",
+        )
+        is None
+    )
+    with pytest.raises(ValidationError, match="ISSUER_CONVERSION_REQUIRED"):
+        dividends_module._conversion_account_amount(lifecycle(), Fraction(1))
+    with pytest.raises(ValidationError, match="ISSUER_CONVERSION_REQUIRED"):
+        dividends_module._issuer_conversion_audit(lifecycle(), Fraction(1))
+
+
+def test_dividend_phase_entry_guards_reject_invalid_mode_identity_order_and_cutoff() -> None:
+    with pytest.raises(ValidationError, match="request must be"):
+        ledger().apply_dividend_lifecycle("invalid")
+
+    no_mode = ledger()
+    no_mode._dividend_execution_mode = None
+    with pytest.raises(ValidationError, match="DIVIDEND_EXECUTION_MODE_REQUIRED"):
+        apply_entitlement(no_mode)
+
+    legacy_fx = ledger()
+    legacy_fx._fx_valuation_mode = FxValuationMode.LEGACY
+    with pytest.raises(ValidationError, match="EVIDENCED_PIT_REQUIRED"):
+        apply_entitlement(legacy_fx)
+
+    with pytest.raises(ValidationError, match="UNKNOWN_DIVIDEND_INSTRUMENT"):
+        apply_entitlement(
+            ledger(),
+            replace(lifecycle(), instrument_id="UNKNOWN"),
+        )
+
+    missing_basis = ledger()
+    with pytest.raises(ValidationError, match="ENTITLEMENT_BASIS_REQUIRED"):
+        missing_basis.apply_dividend_lifecycle(
+            request(
+                lifecycle(),
+                DividendExecutionPhase.ENTITLEMENT,
+                cutoff=EX_AT,
+            )
+        )
+
+    identity_mismatch = ledger()
+    with pytest.raises(ValidationError, match="ENTITLEMENT_BASIS_IDENTITY_MISMATCH"):
+        apply_entitlement(
+            identity_mismatch,
+            evidence_basis=replace(basis(), account_id="other"),
+        )
+
+    cutoff_mismatch = ledger()
+    early_entitlement = replace(
+        entitlement(),
+        evidence=evidence(
+            "entitlement-early",
+            effective_at=EX_AT - timedelta(hours=1),
+            available_at=EX_AT - timedelta(hours=1),
+        ),
+    )
+    with pytest.raises(ValidationError, match="ENTITLEMENT_CUTOFF_PRECEDES_EX_AT"):
+        cutoff_mismatch.apply_dividend_lifecycle(
+            request(
+                lifecycle(terms=early_entitlement),
+                DividendExecutionPhase.ENTITLEMENT,
+                cutoff=EX_AT - timedelta(minutes=30),
+                evidence_basis=basis(),
+            )
+        )
+
+    no_parent = ledger()
+    with pytest.raises(ValidationError, match="DIVIDEND_PHASE_ORDER_INVALID"):
+        no_parent.apply_dividend_lifecycle(
+            request(
+                lifecycle(choice=election("HKD"), policy=certified_policy()),
+                DividendExecutionPhase.ISSUER_CONVERSION,
+                cutoff=EX_AT + timedelta(days=1),
+            )
+        )
+
+    skipped_conversion = ledger()
+    apply_entitlement(skipped_conversion)
+    with pytest.raises(ValidationError, match="DIVIDEND_PHASE_ORDER_INVALID"):
+        skipped_conversion.apply_dividend_lifecycle(
+            request(
+                lifecycle(
+                    choice=election("HKD"),
+                    policy=certified_policy(),
+                    paid=payment(gross="3", net="3"),
+                ),
+                DividendExecutionPhase.PAYMENT,
+                cutoff=EX_AT + timedelta(days=2),
+            )
+        )
+
+
+def test_dividend_observation_and_valuation_type_guards_fail_closed() -> None:
+    legacy = SimpleNamespace(fx_valuation_mode=FxValuationMode.LEGACY)
+    with pytest.raises(ValidationError, match="EVIDENCED_PIT_REQUIRED"):
+        dividends_module.observe_pit_fx(legacy, None)
+    with pytest.raises(ValidationError, match="rate must be a PitFxRate"):
+        ledger().observe_pit_fx("invalid")
+    with pytest.raises(ValidationError, match="finite Decimal or FixedPoint"):
+        dividends_module.convert_for_valuation(
+            SimpleNamespace(fx_valuation_mode=FxValuationMode.EVIDENCED_PIT),
+            "invalid",
+            "HKD",
+            EX_AT,
+        )
+    with pytest.raises(ValidationError, match="finite Decimal or FixedPoint"):
+        dividends_module.convert_for_valuation(
+            SimpleNamespace(fx_valuation_mode=FxValuationMode.EVIDENCED_PIT),
+            Decimal("NaN"),
+            "HKD",
+            EX_AT,
+        )
+    with pytest.raises(ValidationError, match="EVIDENCED_PIT_REQUIRED"):
+        dividends_module.record_dividend_valuation(legacy, as_of=EX_AT)
+
+    zero_account = ledger()
+    apply_entitlement(
+        zero_account,
+        lifecycle(terms=entitlement(approved="0")),
+    )
+    assert zero_account.dividend_exposure(as_of=EX_AT).items == ()
+
+
 def test_aggregate_rounding_happens_once_after_account_quantity_is_known() -> None:
     account = ledger()
     value = lifecycle(
@@ -610,6 +851,147 @@ def test_production_actual_payment_requires_separate_trusted_verification() -> N
                 replace(prefix, payment=payment(gross="3", net="3")),
                 DividendExecutionPhase.PAYMENT,
                 cutoff=EX_AT + timedelta(days=2),
+            )
+        )
+
+    assert account.capture_state() == before
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [DividendExecutionMode.SCENARIO_ONLY, DividendExecutionMode.PRODUCTION_CERTIFIED],
+)
+def test_future_effective_policy_cannot_round_entitlement_before_ex(
+    mode: DividendExecutionMode,
+) -> None:
+    class Verifier:
+        def verify_entitlement_basis(self, *, basis, lifecycle) -> bool:
+            return True
+
+        def verify_payment_policy(self, *, policy, lifecycle) -> bool:
+            return True
+
+    verifier = Verifier() if mode is DividendExecutionMode.PRODUCTION_CERTIFIED else None
+    account = ledger(mode=mode, verifier=verifier)
+    future_policy = replace(
+        certified_policy(decimal_places=0),
+        evidence=evidence(
+            "future-policy",
+            effective_at=EX_AT + timedelta(days=5),
+            available_at=EX_AT - timedelta(hours=1),
+            captured_at=EX_AT + timedelta(days=1),
+        ),
+    )
+    value = lifecycle(
+        terms=entitlement(approved="1.01"),
+        policy=future_policy,
+    )
+    before = account.capture_state()
+
+    with pytest.raises(ValidationError, match="DIVIDEND_FACT_NOT_EFFECTIVE"):
+        account.apply_dividend_lifecycle(
+            request(
+                value,
+                DividendExecutionPhase.ENTITLEMENT,
+                cutoff=EX_AT + timedelta(days=10),
+                evidence_basis=basis(certification_ref="basis-certified"),
+            )
+        )
+
+    assert account.capture_state() == before
+    assert account.dividend_receivable_balance("HKD") == 0
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [DividendExecutionMode.SCENARIO_ONLY, DividendExecutionMode.PRODUCTION_CERTIFIED],
+)
+def test_policy_learned_after_ex_cannot_rewrite_entitlement_receivable(
+    mode: DividendExecutionMode,
+) -> None:
+    class Verifier:
+        def verify_entitlement_basis(self, *, basis, lifecycle) -> bool:
+            return True
+
+        def verify_payment_policy(self, *, policy, lifecycle) -> bool:
+            return True
+
+    verifier = Verifier() if mode is DividendExecutionMode.PRODUCTION_CERTIFIED else None
+    account = ledger(mode=mode, verifier=verifier)
+    learned_late_policy = replace(
+        certified_policy(decimal_places=0),
+        evidence=evidence(
+            "late-policy",
+            effective_at=EX_AT - timedelta(hours=1),
+            available_at=EX_AT + timedelta(days=1),
+            captured_at=EX_AT + timedelta(days=2),
+        ),
+    )
+    value = lifecycle(
+        terms=entitlement(approved="1.01"),
+        policy=learned_late_policy,
+    )
+    before = account.capture_state()
+
+    with pytest.raises(ValidationError, match="LATE_ENTITLEMENT_UNSUPPORTED"):
+        account.apply_dividend_lifecycle(
+            request(
+                value,
+                DividendExecutionPhase.ENTITLEMENT,
+                cutoff=EX_AT + timedelta(days=10),
+                evidence_basis=basis(certification_ref="basis-certified"),
+            )
+        )
+
+    assert account.capture_state() == before
+    assert account.dividend_receivable_balance("HKD") == 0
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [DividendExecutionMode.SCENARIO_ONLY, DividendExecutionMode.PRODUCTION_CERTIFIED],
+)
+def test_future_effective_election_cannot_advance_ledger_beyond_cutoff(
+    mode: DividendExecutionMode,
+) -> None:
+    class Verifier:
+        def verify_entitlement_basis(self, *, basis, lifecycle) -> bool:
+            return True
+
+        def verify_payment_policy(self, *, policy, lifecycle) -> bool:
+            return True
+
+    verifier = Verifier() if mode is DividendExecutionMode.PRODUCTION_CERTIFIED else None
+    account = ledger(mode=mode, verifier=verifier)
+    initial = lifecycle()
+    apply_entitlement(
+        account,
+        initial,
+        basis(certification_ref="basis-certified"),
+    )
+    cutoff = EX_AT + timedelta(days=1)
+    future_election = replace(
+        election("HKD"),
+        evidence=evidence(
+            "future-election",
+            effective_at=EX_AT + timedelta(days=5),
+            available_at=cutoff,
+            captured_at=cutoff,
+        ),
+    )
+    value = lifecycle(
+        terms=initial.entitlement,
+        choice=future_election,
+        policy=certified_policy(at=cutoff),
+    )
+    before = account.capture_state()
+
+    with pytest.raises(ValidationError, match="DIVIDEND_FACT_NOT_EFFECTIVE_AT_CUTOFF"):
+        account.apply_dividend_lifecycle(
+            request(
+                value,
+                DividendExecutionPhase.ISSUER_CONVERSION,
+                cutoff=cutoff,
             )
         )
 

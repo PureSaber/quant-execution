@@ -10,7 +10,7 @@ from conftest import T0, fp
 from quant_data_kit.exceptions import ValidationError
 
 from quant_execution.contracts import Fee, Settlement
-from quant_execution.dividends import DIVIDEND_RECORD_SCHEMA_ID
+from quant_execution.dividends import DIVIDEND_RECORD_SCHEMA_ID, dividend_record_from_dict
 from quant_execution.schemas import (
     FEE_SCHEMA_ID,
     FILL_SCHEMA_ID,
@@ -183,6 +183,11 @@ def test_dividend_record_schema_round_trips_new_golden_without_changing_legacy_s
     validate_json_record(DIVIDEND_RECORD_SCHEMA_ID, record, golden["schema_version"])
     with pytest.raises(ValidationError, match="Unknown execution schema ID"):
         get_json_schema(DIVIDEND_RECORD_SCHEMA_ID, LEGACY_SCHEMA_VERSION)
+    with pytest.raises(ValidationError, match="dividend records require"):
+        execution_payload(
+            dividend_record_from_dict(record),
+            version=LEGACY_SCHEMA_VERSION,
+        )
     schema = get_arrow_schema(DIVIDEND_RECORD_SCHEMA_ID, SCHEMA_VERSION)
     table = pa.Table.from_pylist(
         [

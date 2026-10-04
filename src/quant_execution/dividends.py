@@ -1006,15 +1006,31 @@ def _apply_dividend_lifecycle(ledger, request: DividendExecutionRequest) -> Divi
     prior_state = ledger._dividend_lifecycle_states.get(state_key)
     parent_hash = prior_state.state_sha256 if prior_state is not None else "0" * 64
     event = _phase_event(lifecycle, phase)
-    phase_facts = [event]
-    if phase is DividendExecutionPhase.ISSUER_CONVERSION:
+    if phase is DividendExecutionPhase.ENTITLEMENT:
+        phase_facts = [lifecycle.entitlement]
+        if lifecycle.payment_policy is not None:
+            phase_facts.append(lifecycle.payment_policy)
+    elif phase is DividendExecutionPhase.ISSUER_CONVERSION:
         phase_facts = [lifecycle.election]
         if lifecycle.conversion is not None:
             phase_facts.append(lifecycle.conversion)
         if lifecycle.payment_policy is not None:
             phase_facts.append(lifecycle.payment_policy)
+    else:
+        phase_facts = [
+            fact
+            for fact in (
+                lifecycle.election,
+                lifecycle.conversion,
+                lifecycle.payment_policy,
+                lifecycle.payment,
+            )
+            if fact is not None
+        ]
     economic_at = max(_fact_effective_at(item) for item in phase_facts)
     available_at = max(_fact_available_at(item) for item in phase_facts)
+    if economic_at > request.cutoff:
+        raise ValidationError("DIVIDEND_FACT_NOT_EFFECTIVE_AT_CUTOFF")
     transaction_before = len(ledger._transactions)
     postings: tuple[Posting, ...] = ()
     issuer_conversion_audit: Mapping[str, object] | None = None
@@ -1034,6 +1050,8 @@ def _apply_dividend_lifecycle(ledger, request: DividendExecutionRequest) -> Divi
             raise ValidationError("LATE_ENTITLEMENT_UNSUPPORTED")
         if request.cutoff < basis.ex_at:
             raise ValidationError("ENTITLEMENT_CUTOFF_PRECEDES_EX_AT")
+        if economic_at > basis.ex_at:
+            raise ValidationError("DIVIDEND_FACT_NOT_EFFECTIVE_AT_PHASE")
         if ledger._event_time > basis.ex_at:
             raise ValidationError("LEDGER_PASSED_EX_AT")
         if ledger.dividend_execution_mode is DividendExecutionMode.PRODUCTION_CERTIFIED:

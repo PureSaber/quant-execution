@@ -200,7 +200,7 @@ python -m pytest --cov=quant_execution --cov-branch --cov-report=term-missing \
   --cov-report=json:coverage.json -q
 python -m coverage report --fail-under=80
 python tools/check_branch_coverage.py coverage.json --threshold 90 \
-  broker contracts schemas engine matching state_machine ledger rules artifacts
+  broker contracts schemas engine matching state_machine ledger rules artifacts dividends
 python benchmarks/benchmark_replay.py --workload matching --matching-events 10000000 \
   --repeat 3 --require-rate 50000 --memory-limit-gib 16 --artifact-mode arrow \
   --artifact-root /dedicated/m7-artifacts --artifact-retention keep \
