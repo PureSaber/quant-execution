@@ -114,6 +114,19 @@ def multiply_decimal_exact(*values: Decimal | FixedPoint | int) -> Decimal:
     return fraction_decimal_exact(result)
 
 
+def fixed_fraction_half_even(value: Fraction, scale: int) -> FixedPoint:
+    """Round a rational book allocation/report value once, independently of context."""
+    if not isinstance(value, Fraction):
+        raise ValidationError("value must be a Fraction")
+    FixedPoint(0, scale)  # Validate the bounded scale before exponentiation.
+    scaled = value * 10**scale
+    units, remainder = divmod(abs(scaled.numerator), scaled.denominator)
+    doubled = remainder * 2
+    if doubled > scaled.denominator or (doubled == scaled.denominator and units % 2):
+        units += 1
+    return FixedPoint(-units if scaled < 0 else units, scale)
+
+
 def floor_to_scale(value: Decimal, scale: int) -> FixedPoint:
     return fixed(value, scale, rounding=ROUND_DOWN)
 

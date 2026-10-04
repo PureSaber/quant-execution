@@ -150,6 +150,16 @@ verifies the actual payment. Manifest `trusted_verification_scope` lists only th
 `market_admission_certified` remains false because this module does not assess complete market
 admission.
 
+Under `EVIDENCED_PIT`, `AccountSnapshot.cost_basis` is a reporting average rounded
+half-even to the instrument price field's scale. Mixed fills can have a repeating
+average or a finite average finer than that scale. Valuation, risk and settlement
+use exact posted total cost rather than that display price. Partial closes allocate
+the proportional total book cost once, half-even at `money_scale`; the unallocated
+residue stays with the position, and the final close removes all remaining cost.
+Realized P&L is the exact residual of posted proceeds and allocated cost. This book
+allocation convention does not relax dividend payment-policy or PIT FX precision
+requirements. Fees remain separate expense postings.
+
 Manifest `1.1.0` dividend exports seal one ledger snapshot before writing. Opening positions,
 external cash, marks, ordinary ledger events, PIT FX observations, valuations, and dividend phases
 share one ordered operation sequence. Replay applies those business facts in order and uses final
