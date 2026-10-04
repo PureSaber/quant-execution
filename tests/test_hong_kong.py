@@ -6,8 +6,23 @@ import pytest
 from conftest import T0, fp, spec
 from quant_data_kit import AssetClass
 from quant_data_kit.exceptions import ValidationError
+from quant_data_kit.financial import (
+    CurrencyReference,
+    DividendEntitlement,
+    DividendLifecycle,
+    EvidenceTiming,
+    PhaseEvidence,
+    PublishedAmount,
+)
 
 from quant_execution.contracts import Side
+from quant_execution.dividends import (
+    DividendEntitlementBasis,
+    DividendExecutionMode,
+    DividendExecutionPhase,
+    DividendExecutionRequest,
+    FxValuationMode,
+)
 from quant_execution.hong_kong import HKDailyExecution, HKFeeSchedule
 from quant_execution.rules import RuleBookRiskGate
 
@@ -46,7 +61,7 @@ def instrument():
     )
 
 
-def account():
+def account(**ledger_options):
     return HKDailyExecution(
         {"00700": instrument()},
         initial_cash=fp(100000),
@@ -60,6 +75,7 @@ def account():
             date(2026, 1, 8),
             date(2026, 1, 9),
         ],
+        **ledger_options,
     )
 
 
@@ -81,8 +97,12 @@ def test_both_sides_have_rounded_stamp_and_component_fees():
         schedule().charge(fp(10000), date(2024, 1, 1), stamp_exempt=False)
 
 
-def test_same_day_sale_allowed_but_cash_locks_until_t_plus_two_close():
-    broker = account()
+@pytest.mark.parametrize("mode", [None, DividendExecutionMode.SCENARIO_ONLY])
+def test_same_day_sale_allowed_but_cash_locks_until_t_plus_two_close(mode):
+    broker = account(
+        dividend_execution_mode=mode,
+        fx_valuation_mode=FxValuationMode.EVIDENCED_PIT if mode else FxValuationMode.LEGACY,
+    )
     _, buy_fee = order(broker, "buy", Side.BUY)
     available = broker.available_cash()
     _, sell_fee = order(broker, "sell", Side.SELL, at=T0 + timedelta(seconds=1))
@@ -151,3 +171,121 @@ def test_non_cash_assets_are_rejected():
             fees=schedule(),
             settlement_days=[T0.date()],
         )
+
+
+def test_default_constructor_keeps_legacy_ledger():
+    broker = account()
+    assert broker.ledger.dividend_execution_mode is None
+    assert broker.ledger.fx_valuation_mode is FxValuationMode.LEGACY
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (
+            {"dividend_execution_mode": DividendExecutionMode.SCENARIO_ONLY},
+            "requires EVIDENCED_PIT",
+        ),
+        (
+            {"fx_valuation_mode": FxValuationMode.EVIDENCED_PIT},
+            "requires an explicit dividend execution mode",
+        ),
+        (
+            {
+                "dividend_execution_mode": DividendExecutionMode.PRODUCTION_CERTIFIED,
+                "fx_valuation_mode": FxValuationMode.EVIDENCED_PIT,
+            },
+            "requires a trusted verifier",
+        ),
+    ],
+)
+def test_constructor_preserves_ledger_mode_validation(options, message):
+    with pytest.raises(ValidationError, match=message):
+        account(**options)
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+def test_hk_entitlement_uses_supplied_production_verifier(trusted):
+    calls = []
+
+    class Verifier:
+        def verify_entitlement_basis(self, *, basis, lifecycle):
+            calls.append((basis, lifecycle))
+            return trusted
+
+        def verify_payment_policy(self, *, policy, lifecycle):
+            raise AssertionError("Entitlement without rounding does not use payment policy")
+
+        def verify_dividend_payment(self, *, payment, lifecycle):
+            raise AssertionError("Entitlement does not verify a payment")
+
+    broker = account(
+        dividend_execution_mode=DividendExecutionMode.PRODUCTION_CERTIFIED,
+        fx_valuation_mode=FxValuationMode.EVIDENCED_PIT,
+        entitlement_evidence_verifier=Verifier(),
+    )
+    broker.mark("00700", fp(100), T0)
+    order(broker, "buy", Side.BUY)
+    ex_at = T0 + timedelta(seconds=1)
+    hkd = CurrencyReference(
+        source_label="HKD", calculation_currency="HKD", normalization_rule="identity"
+    )
+    lifecycle = DividendLifecycle(
+        dividend_id="hk-dividend",
+        instrument_id="00700",
+        entitlement=DividendEntitlement(
+            evidence=PhaseEvidence(
+                event_id="hk-entitlement",
+                source="synthetic-hk-fixture",
+                evidence_id="hk-entitlement-evidence",
+                timing=EvidenceTiming(
+                    effective_at=ex_at.isoformat(),
+                    available_at=T0.isoformat(),
+                    captured_at=T0.isoformat(),
+                    source_published_at=T0.isoformat(),
+                ),
+            ),
+            approved_amount=PublishedAmount(
+                amount_text="1.00",
+                source_unit_text="1",
+                source_unit_name="share",
+                published_decimal_places=2,
+                approximate=False,
+            ),
+            declared_currency=hkd,
+            record_date="2026-01-03",
+            scheduled_payment_date="2026-01-10",
+            payment_currencies=(hkd,),
+            default_payment_currency="HKD",
+        ),
+    )
+    basis = DividendEntitlementBasis(
+        account_id="hk-research",
+        dividend_id=lifecycle.dividend_id,
+        instrument_id="00700",
+        ex_at=ex_at,
+        entitled_quantity=fp(100, 0),
+        available_at=T0,
+        captured_at=T0,
+        evidence_id="hk-position-evidence",
+        evidence_source="synthetic-hk-fixture",
+        certification_ref="test-verifier",
+    )
+    request = DividendExecutionRequest(
+        lifecycle=lifecycle,
+        phase=DividendExecutionPhase.ENTITLEMENT,
+        cutoff=ex_at,
+        entitlement_basis=basis,
+    )
+    spendable = broker.available_cash()
+    before_nav = broker.ledger.snapshot(T0).nav.to_decimal()
+    before = broker.ledger.capture_state()
+    if trusted:
+        broker.ledger.apply_dividend_lifecycle(request)
+        assert broker.ledger.snapshot(ex_at).nav.to_decimal() == before_nav + 100
+        assert broker.available_cash() == spendable
+    else:
+        with pytest.raises(ValidationError, match="ENTITLEMENT_EVIDENCE_NOT_CERTIFIED"):
+            broker.ledger.apply_dividend_lifecycle(request)
+        assert broker.ledger.capture_state() == before
+    assert calls == [(basis, lifecycle)]
