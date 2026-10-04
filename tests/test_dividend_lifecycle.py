@@ -710,6 +710,129 @@ def test_stable_identity_allows_ordinary_and_special_same_day_and_is_idempotent(
     assert len(account._dividend_lifecycle_states) == 2
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [DividendExecutionMode.SCENARIO_ONLY, DividendExecutionMode.PRODUCTION_CERTIFIED],
+)
+def test_idempotent_phase_retries_cannot_return_facts_after_request_cutoff(
+    mode: DividendExecutionMode,
+) -> None:
+    class Verifier:
+        def verify_entitlement_basis(self, *, basis, lifecycle) -> bool:
+            return True
+
+        def verify_payment_policy(self, *, policy, lifecycle) -> bool:
+            return True
+
+        def verify_dividend_payment(self, *, payment, lifecycle) -> bool:
+            return True
+
+    verifier = Verifier() if mode is DividendExecutionMode.PRODUCTION_CERTIFIED else None
+    account = ledger(mode=mode, verifier=verifier)
+    entitlement_terms = replace(
+        entitlement(),
+        evidence=evidence(
+            "entitlement-early-effective",
+            effective_at=EX_AT - timedelta(hours=1),
+            available_at=EX_AT - timedelta(hours=1),
+        ),
+    )
+    initial = lifecycle(terms=entitlement_terms)
+    evidence_basis = basis(certification_ref="basis-certified")
+    entitlement_record = account.apply_dividend_lifecycle(
+        request(
+            initial,
+            DividendExecutionPhase.ENTITLEMENT,
+            cutoff=EX_AT,
+            evidence_basis=evidence_basis,
+        )
+    )
+
+    conversion_at = EX_AT + timedelta(days=1)
+    conversion_choice = replace(
+        election("HKD", at=conversion_at),
+        evidence=evidence(
+            "conversion-election",
+            effective_at=conversion_at,
+            available_at=conversion_at - timedelta(hours=1),
+        ),
+    )
+    conversion_prefix = lifecycle(
+        terms=entitlement_terms,
+        choice=conversion_choice,
+        policy=certified_policy(at=EX_AT),
+    )
+    conversion_record = account.apply_dividend_lifecycle(
+        request(
+            conversion_prefix,
+            DividendExecutionPhase.ISSUER_CONVERSION,
+            cutoff=conversion_at,
+        )
+    )
+
+    payment_at = EX_AT + timedelta(days=2)
+    actual_payment = payment(gross="3", net="3", at=payment_at)
+    paid = replace(conversion_prefix, payment=actual_payment)
+    payment_record = account.apply_dividend_lifecycle(
+        request(
+            paid,
+            DividendExecutionPhase.PAYMENT,
+            cutoff=payment_at,
+        )
+    )
+
+    retries = (
+        (
+            initial,
+            DividendExecutionPhase.ENTITLEMENT,
+            evidence_basis,
+            entitlement_record,
+            EX_AT - timedelta(minutes=30),
+            "DIVIDEND_PHASE_APPLIED_AFTER_CUTOFF",
+        ),
+        (
+            conversion_prefix,
+            DividendExecutionPhase.ISSUER_CONVERSION,
+            None,
+            conversion_record,
+            conversion_at - timedelta(minutes=30),
+            "DIVIDEND_FACT_NOT_EFFECTIVE_AT_CUTOFF",
+        ),
+        (
+            paid,
+            DividendExecutionPhase.PAYMENT,
+            None,
+            payment_record,
+            payment_at - timedelta(minutes=30),
+            "FUTURE_DIVIDEND_FACT_IN_REQUEST",
+        ),
+    )
+    for value, phase, phase_basis, prior_record, early_cutoff, message in retries:
+        for accepted_cutoff in (prior_record.cutoff, prior_record.cutoff + timedelta(days=1)):
+            assert (
+                account.apply_dividend_lifecycle(
+                    request(
+                        value,
+                        phase,
+                        cutoff=accepted_cutoff,
+                        evidence_basis=phase_basis,
+                    )
+                )
+                == prior_record
+            )
+        before = account.capture_state()
+        with pytest.raises(ValidationError, match=message):
+            account.apply_dividend_lifecycle(
+                request(
+                    value,
+                    phase,
+                    cutoff=early_cutoff,
+                    evidence_basis=phase_basis,
+                )
+            )
+        assert account.capture_state() == before
+
+
 def test_same_phase_identity_conflict_rolls_back_everything() -> None:
     account = ledger()
     value = lifecycle()

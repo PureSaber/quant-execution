@@ -982,29 +982,6 @@ def _apply_dividend_lifecycle(ledger, request: DividendExecutionRequest) -> Divi
         raise ValidationError("LATE_ENTITLEMENT_UNSUPPORTED")
     _validate_cutoff_snapshot(lifecycle, request.cutoff)
 
-    key = _record_key(ledger.account_id, lifecycle.dividend_id, phase)
-    prefix = _lifecycle_prefix(lifecycle, phase)
-    prior_record = ledger._dividend_execution_by_key.get(key)
-    if prior_record is not None:
-        prior_state = ledger._dividend_lifecycle_states.get(
-            (ledger.account_id, lifecycle.dividend_id)
-        )
-        expected_basis = (
-            basis
-            if phase is DividendExecutionPhase.ENTITLEMENT
-            else (prior_state.entitlement_basis if prior_state is not None else None)
-        )
-        same = (
-            _thaw(prior_record.lifecycle_snapshot) == prefix
-            and prior_record.entitlement_basis == expected_basis
-        )
-        if same:
-            return prior_record
-        raise ValidationError("DIVIDEND_PHASE_ID_REUSED")
-
-    state_key = (ledger.account_id, lifecycle.dividend_id)
-    prior_state = ledger._dividend_lifecycle_states.get(state_key)
-    parent_hash = prior_state.state_sha256 if prior_state is not None else "0" * 64
     event = _phase_event(lifecycle, phase)
     if phase is DividendExecutionPhase.ENTITLEMENT:
         phase_facts = [lifecycle.entitlement]
@@ -1031,6 +1008,32 @@ def _apply_dividend_lifecycle(ledger, request: DividendExecutionRequest) -> Divi
     available_at = max(_fact_available_at(item) for item in phase_facts)
     if economic_at > request.cutoff:
         raise ValidationError("DIVIDEND_FACT_NOT_EFFECTIVE_AT_CUTOFF")
+
+    key = _record_key(ledger.account_id, lifecycle.dividend_id, phase)
+    prefix = _lifecycle_prefix(lifecycle, phase)
+    prior_record = ledger._dividend_execution_by_key.get(key)
+    if prior_record is not None:
+        prior_state = ledger._dividend_lifecycle_states.get(
+            (ledger.account_id, lifecycle.dividend_id)
+        )
+        expected_basis = (
+            basis
+            if phase is DividendExecutionPhase.ENTITLEMENT
+            else (prior_state.entitlement_basis if prior_state is not None else None)
+        )
+        same = (
+            _thaw(prior_record.lifecycle_snapshot) == prefix
+            and prior_record.entitlement_basis == expected_basis
+        )
+        if same:
+            if prior_record.applied_at > request.cutoff:
+                raise ValidationError("DIVIDEND_PHASE_APPLIED_AFTER_CUTOFF")
+            return prior_record
+        raise ValidationError("DIVIDEND_PHASE_ID_REUSED")
+
+    state_key = (ledger.account_id, lifecycle.dividend_id)
+    prior_state = ledger._dividend_lifecycle_states.get(state_key)
+    parent_hash = prior_state.state_sha256 if prior_state is not None else "0" * 64
     transaction_before = len(ledger._transactions)
     postings: tuple[Posting, ...] = ()
     issuer_conversion_audit: Mapping[str, object] | None = None
