@@ -1,0 +1,24 @@
+{
+  "record": {
+    "observation_sequence": 0,
+    "operation_sequence": 0,
+    "rate_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "rate_payload": {
+      "available_at": "2026-01-02T00:00:00Z",
+      "base_currency": "USD",
+      "captured_at": "2026-01-03T00:00:00Z",
+      "event_id": "fx-1",
+      "evidence_id": "fx-evidence-1",
+      "observed_at": "2026-01-02T00:00:00Z",
+      "quote_currency": "HKD",
+      "rate_convention": "quote_per_base",
+      "rate_text": "7.8",
+      "schema": "puresaber.pit-fx-rate/1",
+      "source": "fixture"
+    },
+    "record_kind": "pit_fx_observation",
+    "schema": "puresaber.execution.dividend-record/1",
+    "transaction_count": 2
+  },
+  "schema_version": "1.1.0"
+}

@@ -29,7 +29,15 @@ from quant_data_kit import (
 )
 from quant_data_kit.exceptions import ValidationError
 
-from quant_execution._fixed import add_decimal_exact, decimal, fixed
+from quant_execution._fixed import (
+    add_decimal_exact,
+    decimal,
+    decimal_fraction,
+    fixed,
+    fraction_decimal_exact,
+    multiply_decimal_exact,
+    sum_decimal_exact,
+)
 from quant_execution._json import fixed_token, flat_sequence_bytes, string_token, utc_token
 from quant_execution.artifacts import (
     fee_bytes,
@@ -51,6 +59,32 @@ from quant_execution.contracts import (
     Settlement,
     Side,
     _currency,
+)
+from quant_execution.dividends import (
+    DIVIDEND_JOURNAL_SCHEMA_ID,
+    DividendExecutionMode,
+    DividendExecutionRequest,
+    DividendExposureSnapshot,
+    DividendValuationRecord,
+    EntitlementEvidenceVerifier,
+    FxValuationMode,
+    PitFxObservationRecord,
+    canonical_bytes,
+)
+from quant_execution.dividends import (
+    apply_dividend_lifecycle as apply_dividend_lifecycle_request,
+)
+from quant_execution.dividends import (
+    convert_for_valuation as convert_dividend_value,
+)
+from quant_execution.dividends import (
+    dividend_exposure as build_dividend_exposure,
+)
+from quant_execution.dividends import (
+    observe_pit_fx as observe_dividend_pit_fx,
+)
+from quant_execution.dividends import (
+    record_dividend_valuation as build_dividend_valuation,
 )
 from quant_execution.schemas import execution_payload
 
@@ -100,11 +134,34 @@ class ExactAccountLedger:
         fx_to_base: Mapping[str, FixedPoint] | None = None,
         money_scale: int = 8,
         opened_at: datetime | None = None,
+        dividend_execution_mode: DividendExecutionMode | None = None,
+        fx_valuation_mode: FxValuationMode = FxValuationMode.LEGACY,
+        entitlement_evidence_verifier: EntitlementEvidenceVerifier | None = None,
     ) -> None:
         if not account_id.strip() or not base_currency.strip():
             raise ValidationError("account_id and base_currency are required")
         if not 0 <= money_scale <= 18:
             raise ValidationError("money_scale must be in [0, 18]")
+        if dividend_execution_mode is not None and not isinstance(
+            dividend_execution_mode, DividendExecutionMode
+        ):
+            raise ValidationError("dividend_execution_mode has an invalid type")
+        if not isinstance(fx_valuation_mode, FxValuationMode):
+            raise ValidationError("fx_valuation_mode has an invalid type")
+        if (
+            dividend_execution_mode is not None
+            and fx_valuation_mode is not FxValuationMode.EVIDENCED_PIT
+        ):
+            raise ValidationError("new dividend lifecycle execution requires EVIDENCED_PIT")
+        if fx_valuation_mode is FxValuationMode.EVIDENCED_PIT and dividend_execution_mode is None:
+            raise ValidationError("EVIDENCED_PIT requires an explicit dividend execution mode")
+        if (
+            dividend_execution_mode is DividendExecutionMode.PRODUCTION_CERTIFIED
+            and entitlement_evidence_verifier is None
+        ):
+            raise ValidationError("production dividend execution requires a trusted verifier")
+        if fx_valuation_mode is FxValuationMode.EVIDENCED_PIT and fx_to_base:
+            raise ValidationError("EVIDENCED_PIT does not accept legacy initial FX snapshots")
         self._account_id = account_id
         self._base_currency = _currency(base_currency, "base_currency")
         self._instruments = MappingProxyType(dict(instruments))
@@ -114,6 +171,9 @@ class ExactAccountLedger:
             if self._is_derivative(spec)
         )
         self._money_scale = money_scale
+        self._dividend_execution_mode = dividend_execution_mode
+        self._fx_valuation_mode = fx_valuation_mode
+        self._entitlement_evidence_verifier = entitlement_evidence_verifier
         self._initial_cash = dict(initial_cash or {})
         self._initial_fx = dict(fx_to_base or {})
         self._default_opened_at = (
@@ -145,6 +205,18 @@ class ExactAccountLedger:
         self._position_lots: dict[str, list[tuple[date, Decimal]]] = {}
         self._fill_close_allocations: dict[str, tuple[Decimal, Decimal]] = {}
         self._dividend_entitlements: dict[tuple[str, str, date], tuple[Decimal, Decimal]] = {}
+        self._dividend_lifecycle_states = {}
+        self._dividend_execution_records = []
+        self._dividend_execution_by_key = {}
+        self._dividend_phase_fingerprints = {}
+        self._dividend_pit_fx_observations = []
+        self._dividend_pit_fx_by_event_id = {}
+        self._dividend_pit_fx_records = []
+        self._recorded_dividend_valuations = {}
+        self._dividend_valuation_records = []
+        self._dividend_operation_log = []
+        self._dividend_replay_facts: list[dict[str, object]] = []
+        self._dividend_replay_sequence = 0
         self._posting_cache: dict[
             tuple[str, str, Decimal, str | None, Decimal | None, int], Posting
         ] = {}
@@ -166,7 +238,7 @@ class ExactAccountLedger:
                 event_time=opening_time,
                 postings=(
                     self._posting("assets:cash", currency, value),
-                    self._posting("equity:opening", currency, -value),
+                    self._posting("equity:opening", currency, value.copy_negate()),
                 ),
             )
             self._post(transaction)
@@ -196,10 +268,23 @@ class ExactAccountLedger:
         )
         if self._import_seen(transaction):
             return self.snapshot(self._event_time)
-        if event_time < self._event_time or self.cash_balance(currency) + decimal(amount) < 0:
+        resulting_cash = add_decimal_exact(self.cash_balance(currency), decimal(amount))
+        if event_time < self._event_time or resulting_cash < 0:
             raise ValidationError("external cash would reverse time or overdraw account")
+        transaction_before = len(self._transactions)
         self._post(transaction)
         self._event_time = event_time
+        self._record_dividend_replay_fact(
+            kind="external_cash",
+            payload={
+                "transfer_id": transfer_id,
+                "amount": {"units": amount.units, "scale": amount.scale},
+                "currency": currency,
+                "event_time": event_time.isoformat().replace("+00:00", "Z"),
+            },
+            transaction_count_before=transaction_before,
+            transaction_count_after=len(self._transactions),
+        )
         return self.snapshot(event_time)
 
     def book_opening_position(
@@ -217,7 +302,7 @@ class ExactAccountLedger:
             raise ValidationError("opening position requires positive cash-asset quantity and cost")
         if decimal(quantity) % decimal(spec.quantity_step) or acquired_on > self._event_time.date():
             raise ValidationError("invalid opening quantity step or acquisition date")
-        cost = decimal(quantity) * decimal(average_cost) * decimal(spec.contract_multiplier)
+        cost = self._product_for_valuation(quantity, average_cost, spec.contract_multiplier)
         at = self._default_opened_at
         transaction = self._make_transaction(
             event_type=LedgerEventType.SETTLEMENT,
@@ -231,7 +316,7 @@ class ExactAccountLedger:
                     cost,
                     instrument_id=instrument_id,
                 ),
-                self._posting("equity:opening", spec.settlement_currency, -cost),
+                self._posting("equity:opening", spec.settlement_currency, cost.copy_negate()),
                 self._posting(
                     "assets:position",
                     spec.settlement_currency,
@@ -245,7 +330,7 @@ class ExactAccountLedger:
                     spec.settlement_currency,
                     Decimal(0),
                     instrument_id=instrument_id,
-                    quantity_delta=-decimal(quantity),
+                    quantity_delta=decimal(quantity).copy_negate(),
                     quantity_scale=quantity.scale,
                 ),
             ),
@@ -256,9 +341,21 @@ class ExactAccountLedger:
             return self.snapshot(self._event_time)
         if self._event_time != at or self._positions.get(instrument_id, 0):
             raise ValidationError("positions may only be imported before account activity")
+        transaction_before = len(self._transactions)
         self._post(transaction)
         self._position_lots[instrument_id] = [(acquired_on, decimal(quantity))]
         self._marks[instrument_id] = (decimal(average_cost), at, transaction.reference_id)
+        self._record_dividend_replay_fact(
+            kind="opening_position",
+            payload={
+                "instrument_id": instrument_id,
+                "quantity": {"units": quantity.units, "scale": quantity.scale},
+                "average_cost": {"units": average_cost.units, "scale": average_cost.scale},
+                "acquired_on": acquired_on.isoformat(),
+            },
+            transaction_count_before=transaction_before,
+            transaction_count_after=len(self._transactions),
+        )
         return self.snapshot(at)
 
     def _import_seen(self, transaction: LedgerTransaction) -> bool:
@@ -333,6 +430,20 @@ class ExactAccountLedger:
                 "position_lots": self._position_lots,
                 "fill_close_allocations": self._fill_close_allocations,
                 "dividend_entitlements": self._dividend_entitlements,
+                "dividend_lifecycle_states": self._dividend_lifecycle_states,
+                "dividend_execution_records": self._dividend_execution_records,
+                "dividend_execution_by_key": self._dividend_execution_by_key,
+                "dividend_phase_fingerprints": self._dividend_phase_fingerprints,
+                "dividend_pit_fx_observations": self._dividend_pit_fx_observations,
+                "dividend_pit_fx_by_event_id": self._dividend_pit_fx_by_event_id,
+                "dividend_pit_fx_records": self._dividend_pit_fx_records,
+                "recorded_dividend_valuations": self._recorded_dividend_valuations,
+                "dividend_valuation_records": self._dividend_valuation_records,
+                "dividend_operation_log": self._dividend_operation_log,
+                "dividend_replay_facts": self._dividend_replay_facts,
+                "dividend_replay_sequence": self._dividend_replay_sequence,
+                "dividend_execution_mode": self._dividend_execution_mode,
+                "fx_valuation_mode": self._fx_valuation_mode,
                 "posting_cache": self._posting_cache,
                 "fx": self._fx,
                 "fx_history": self._fx_history,
@@ -363,10 +474,116 @@ class ExactAccountLedger:
         self._position_lots = restored["position_lots"]
         self._fill_close_allocations = restored["fill_close_allocations"]
         self._dividend_entitlements = restored["dividend_entitlements"]
+        self._dividend_lifecycle_states = restored["dividend_lifecycle_states"]
+        self._dividend_execution_records = restored["dividend_execution_records"]
+        self._dividend_execution_by_key = restored["dividend_execution_by_key"]
+        self._dividend_phase_fingerprints = restored["dividend_phase_fingerprints"]
+        self._dividend_pit_fx_observations = restored["dividend_pit_fx_observations"]
+        self._dividend_pit_fx_by_event_id = restored["dividend_pit_fx_by_event_id"]
+        self._dividend_pit_fx_records = restored["dividend_pit_fx_records"]
+        self._recorded_dividend_valuations = restored["recorded_dividend_valuations"]
+        self._dividend_valuation_records = restored["dividend_valuation_records"]
+        self._dividend_operation_log = restored["dividend_operation_log"]
+        self._dividend_replay_facts = restored["dividend_replay_facts"]
+        self._dividend_replay_sequence = restored["dividend_replay_sequence"]
+        self._dividend_execution_mode = restored["dividend_execution_mode"]
+        self._fx_valuation_mode = restored["fx_valuation_mode"]
         self._posting_cache = restored["posting_cache"]
         self._fx = restored["fx"]
         self._fx_history = restored["fx_history"]
         self._event_time = restored["event_time"]
+
+    def capture_dividend_export_state(self) -> dict[str, object]:
+        """Seal replay state and immutable construction inputs in one captured value."""
+
+        return {
+            "state": self.capture_state(),
+            "account_id": self.account_id,
+            "base_currency": self.base_currency,
+            "instruments": dict(self.instruments),
+            "initial_cash": dict(self._initial_cash),
+            "money_scale": self.money_scale,
+            "opened_at": self._default_opened_at,
+            "dividend_execution_mode": self.dividend_execution_mode,
+            "fx_valuation_mode": self.fx_valuation_mode,
+            "entitlement_evidence_verifier": self._entitlement_evidence_verifier,
+        }
+
+    def _next_dividend_replay_sequence(self) -> int:
+        sequence = self._dividend_replay_sequence
+        self._dividend_replay_sequence += 1
+        return sequence
+
+    def _record_dividend_replay_fact(
+        self,
+        *,
+        kind: str,
+        payload: Mapping[str, object],
+        transaction_count_before: int,
+        transaction_count_after: int,
+    ) -> None:
+        if self.dividend_execution_mode is None:
+            return
+        self._dividend_replay_facts.append(
+            {
+                "operation_sequence": self._next_dividend_replay_sequence(),
+                "kind": kind,
+                "payload": deepcopy(dict(payload)),
+                "transaction_count_before": transaction_count_before,
+                "transaction_count_after": transaction_count_after,
+            }
+        )
+
+    @staticmethod
+    def _mark_replay_payload(
+        event: MarketEvent,
+        *,
+        event_id: str,
+        price: FixedPoint,
+    ) -> dict[str, object]:
+        return {
+            "event_type": "mark_price",
+            "event_id": event_id,
+            "instrument_id": event.instrument_id,
+            "event_time": event.event_time.isoformat().replace("+00:00", "Z"),
+            "received_at": event.received_at.isoformat().replace("+00:00", "Z"),
+            "available_at": event.available_at.isoformat().replace("+00:00", "Z"),
+            "source": event.source,
+            "trading_day": event.trading_day.isoformat(),
+            "session_id": event.session_id,
+            "sequence": event.sequence,
+            "price": {"units": price.units, "scale": price.scale},
+        }
+
+    def _record_ledger_event_replay_fact(
+        self,
+        event: LedgerEvent,
+        *,
+        trading_day: date | None,
+        transaction_count_before: int,
+    ) -> None:
+        event_kind = {
+            Fill: "fill",
+            Fee: "fee",
+            Funding: "funding",
+            Settlement: "settlement",
+            CorporateActionEvent: "corporate_action",
+        }[type(event)]
+        payload = (
+            market_event_payload(event)
+            if isinstance(event, CorporateActionEvent)
+            else execution_payload(event)
+        )
+        self._record_dividend_replay_fact(
+            kind="ledger_event",
+            payload={
+                "event_kind": event_kind,
+                "event": payload,
+                "trading_day": trading_day.isoformat() if trading_day is not None else None,
+            },
+            transaction_count_before=transaction_count_before,
+            transaction_count_after=len(self._transactions),
+        )
 
     @property
     def transactions(self) -> tuple[LedgerTransaction, ...]:
@@ -383,6 +600,14 @@ class ExactAccountLedger:
     @property
     def money_scale(self) -> int:
         return self._money_scale
+
+    @property
+    def dividend_execution_mode(self) -> DividendExecutionMode | None:
+        return self._dividend_execution_mode
+
+    @property
+    def fx_valuation_mode(self) -> FxValuationMode:
+        return self._fx_valuation_mode
 
     @property
     def instruments(self) -> Mapping[str, InstrumentSpec]:
@@ -406,6 +631,31 @@ class ExactAccountLedger:
             raise ValidationError(
                 "ledger journal hash is unavailable after artifact abort; reset required"
             )
+        if self._dividend_operation_log:
+            payload = {
+                "schema": DIVIDEND_JOURNAL_SCHEMA_ID,
+                "execution_mode": self.dividend_execution_mode.value,
+                "fx_valuation_mode": self.fx_valuation_mode.value,
+                "pit_fx_observations": [item.to_dict() for item in self._dividend_pit_fx_records],
+                "dividend_states": [
+                    state.to_dict() for _, state in sorted(self._dividend_lifecycle_states.items())
+                ],
+                "dividend_records": [item.to_dict() for item in self._dividend_operation_log],
+                "marks": [
+                    {
+                        "event_id": event_id,
+                        "event_time": event_time.isoformat(),
+                        "instrument_id": instrument_id,
+                        "price": str(price),
+                    }
+                    for instrument_id, (price, event_time, event_id) in sorted(self._marks.items())
+                ],
+                "transactions": [
+                    json.loads(self._transaction_bytes(transaction))
+                    for transaction in self._transactions
+                ],
+            }
+            return hashlib.sha256(canonical_bytes(payload)).hexdigest()
         digest = hashlib.sha256()
         digest.update(b'{"fx_snapshots":[')
         for index, (currency, rate, event_time) in enumerate(self._fx_history):
@@ -474,6 +724,8 @@ class ExactAccountLedger:
 
     def set_fx_rate(self, currency: str, rate: FixedPoint, *, event_time: datetime) -> None:
         self._require_mutable()
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
+            raise ValidationError("EVIDENCED_PIT_REJECTS_LEGACY_FX")
         currency = _currency(currency)
         event_time = ensure_utc_datetime(event_time, field="event_time")
         value = decimal(rate)
@@ -498,11 +750,23 @@ class ExactAccountLedger:
     def convert_to_base(
         self, amount: Decimal | FixedPoint, currency: str, *, event_time: datetime
     ) -> Decimal:
-        return self._to_base(
+        return self._convert_for_valuation(
             amount,
             _currency(currency),
             ensure_utc_datetime(event_time, field="event_time"),
         )
+
+    def apply_dividend_lifecycle(self, request: DividendExecutionRequest):
+        return apply_dividend_lifecycle_request(self, request)
+
+    def observe_pit_fx(self, rate) -> PitFxObservationRecord:
+        return observe_dividend_pit_fx(self, rate)
+
+    def dividend_exposure(self, *, as_of: datetime) -> DividendExposureSnapshot:
+        return build_dividend_exposure(self, as_of=as_of)
+
+    def record_dividend_valuation(self, *, as_of: datetime) -> DividendValuationRecord:
+        return build_dividend_valuation(self, as_of=as_of)
 
     def cash_balance(self, currency: str) -> Decimal:
         return self._accounts.get(("assets:cash", currency, None), Decimal(0))
@@ -516,31 +780,38 @@ class ExactAccountLedger:
         """Return declared cash dividends that have not reached their payment date."""
 
         currency = _currency(currency)
-        return sum(
-            (
-                amount
-                for (account, entry_currency, receivable_key), amount in self._accounts.items()
-                if account == "assets:dividend_receivable"
-                and entry_currency == currency
-                and (
-                    instrument_id is None
-                    or (
-                        receivable_key is not None
-                        and receivable_key.startswith(f"{instrument_id}@")
+        dividend_keys = {
+            f"dividend:{state.dividend_id}"
+            for state in self._dividend_lifecycle_states.values()
+            if state.instrument_id == instrument_id
+        }
+        values = (
+            amount
+            for (account, entry_currency, receivable_key), amount in self._accounts.items()
+            if account == "assets:dividend_receivable"
+            and entry_currency == currency
+            and (
+                instrument_id is None
+                or (
+                    receivable_key is not None
+                    and (
+                        receivable_key.startswith(f"{instrument_id}@")
+                        or receivable_key in dividend_keys
                     )
                 )
-            ),
-            Decimal(0),
+            )
+        )
+        return (
+            sum_decimal_exact(values)
+            if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT
+            else sum(values, Decimal(0))
         )
 
     def _dividend_receivable_value(self, event_time: datetime) -> Decimal:
-        return sum(
-            (
-                self._to_base(amount, currency, event_time)
-                for (account, currency, _), amount in self._accounts.items()
-                if account == "assets:dividend_receivable"
-            ),
-            Decimal(0),
+        return self._sum_for_valuation(
+            self._convert_for_valuation(amount, currency, event_time)
+            for (account, currency, _), amount in self._accounts.items()
+            if account == "assets:dividend_receivable"
         )
 
     @property
@@ -555,16 +826,17 @@ class ExactAccountLedger:
     ) -> tuple[dict[str, Decimal], Mapping[str, Decimal], Decimal, Decimal]:
         """Return exact decimal balances needed by the hot pre-trade risk path."""
         event_time = ensure_utc_datetime(event_time, field="event_time")
+        self._require_valuation_time(event_time)
         cash = {
             currency: amount
             for (account, currency, instrument_id), amount in self._accounts.items()
             if account == "assets:cash" and instrument_id is None
         }
-        nav = sum(
-            (self._to_base(amount, currency, event_time) for currency, amount in cash.items()),
-            Decimal(0),
+        nav = self._sum_for_valuation(
+            self._convert_for_valuation(amount, currency, event_time)
+            for currency, amount in cash.items()
         )
-        nav += self._dividend_receivable_value(event_time)
+        nav = add_decimal_exact(nav, self._dividend_receivable_value(event_time))
         initial_margin = Decimal(0)
         for instrument_id, quantity in self._positions.items():
             spec = self._spec(instrument_id)
@@ -572,34 +844,46 @@ class ExactAccountLedger:
             mark = self._mark_price(instrument_id, fallback=average)
             multiplier = decimal(spec.contract_multiplier)
             if self._is_derivative(spec):
-                nav += self._to_base(
-                    (mark - average) * quantity * multiplier,
-                    spec.settlement_currency,
-                    event_time,
+                nav = add_decimal_exact(
+                    nav,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            self._difference_for_valuation(mark, average), quantity, multiplier
+                        ),
+                        spec.settlement_currency,
+                        event_time,
+                    ),
                 )
-                initial_margin += self._to_base(
-                    abs(mark * quantity * multiplier) * _meta_decimal(spec, "initial_margin_rate"),
-                    spec.settlement_currency,
-                    event_time,
+                initial_margin = add_decimal_exact(
+                    initial_margin,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            self._product_for_valuation(mark, quantity, multiplier).copy_abs(),
+                            _meta_decimal(spec, "initial_margin_rate"),
+                        ),
+                        spec.settlement_currency,
+                        event_time,
+                    ),
                 )
             else:
-                nav += self._to_base(
-                    mark * quantity * multiplier,
-                    spec.settlement_currency,
-                    event_time,
+                nav = add_decimal_exact(
+                    nav,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(mark, quantity, multiplier),
+                        spec.settlement_currency,
+                        event_time,
+                    ),
                 )
         return cash, MappingProxyType(self._positions), nav, initial_margin
 
     def portfolio_risk_snapshot(self, event_time: datetime) -> PortfolioRiskSnapshot:
         """Build an exact, read-only base-currency exposure view at one PIT timestamp."""
         at = ensure_utc_datetime(event_time, field="event_time")
+        self._require_valuation_time(at)
         account = self.snapshot(at)
-        cash_value = sum(
-            (
-                self._to_base(decimal(amount), currency, at)
-                for currency, amount in account.cash_balances.items()
-            ),
-            Decimal(0),
+        cash_value = self._sum_for_valuation(
+            self._convert_for_valuation(decimal(amount), currency, at)
+            for currency, amount in account.cash_balances.items()
         )
         positions: list[PositionRiskSnapshot] = []
         gross_exposure = Decimal(0)
@@ -613,8 +897,10 @@ class ExactAccountLedger:
             spec = self._spec(instrument_id)
             mark = self._mark_price(instrument_id)
             multiplier = decimal(spec.contract_multiplier)
-            local_notional = mark * quantity * multiplier
-            base_notional = self._to_base(local_notional, spec.settlement_currency, at)
+            local_notional = self._product_for_valuation(mark, quantity, multiplier)
+            base_notional = self._convert_for_valuation(
+                local_notional, spec.settlement_currency, at
+            )
             position_initial = Decimal(0)
             position_maintenance = Decimal(0)
             if self._is_derivative(spec):
@@ -624,20 +910,24 @@ class ExactAccountLedger:
                             f"InstrumentSpec metadata {key!r} is required for risk snapshot"
                         )
                 absolute_notional = abs(local_notional)
-                position_initial = self._to_base(
-                    absolute_notional * _meta_decimal(spec, "initial_margin_rate"),
+                position_initial = self._convert_for_valuation(
+                    self._product_for_valuation(
+                        absolute_notional, _meta_decimal(spec, "initial_margin_rate")
+                    ),
                     spec.settlement_currency,
                     at,
                 )
-                position_maintenance = self._to_base(
-                    absolute_notional * _meta_decimal(spec, "maintenance_margin_rate"),
+                position_maintenance = self._convert_for_valuation(
+                    self._product_for_valuation(
+                        absolute_notional, _meta_decimal(spec, "maintenance_margin_rate")
+                    ),
                     spec.settlement_currency,
                     at,
                 )
-            gross_exposure += abs(base_notional)
-            net_exposure += base_notional
-            initial_margin += position_initial
-            maintenance_margin += position_maintenance
+            gross_exposure = add_decimal_exact(gross_exposure, base_notional.copy_abs())
+            net_exposure = add_decimal_exact(net_exposure, base_notional)
+            initial_margin = add_decimal_exact(initial_margin, position_initial)
+            maintenance_margin = add_decimal_exact(maintenance_margin, position_maintenance)
             positions.append(
                 PositionRiskSnapshot(
                     instrument_id=instrument_id,
@@ -645,10 +935,12 @@ class ExactAccountLedger:
                     venue=spec.venue,
                     settlement_currency=spec.settlement_currency,
                     quantity=quantity_fp,
-                    mark_price=fixed(mark, spec.price_tick.scale),
-                    base_notional=fixed(base_notional, self.money_scale),
-                    initial_margin=fixed(position_initial, self.money_scale),
-                    maintenance_margin=fixed(position_maintenance, self.money_scale),
+                    mark_price=self._fixed_for_valuation(mark, spec.price_tick.scale),
+                    base_notional=self._fixed_for_valuation(base_notional, self.money_scale),
+                    initial_margin=self._fixed_for_valuation(position_initial, self.money_scale),
+                    maintenance_margin=self._fixed_for_valuation(
+                        position_maintenance, self.money_scale
+                    ),
                 )
             )
         return PortfolioRiskSnapshot(
@@ -656,11 +948,11 @@ class ExactAccountLedger:
             event_time=at,
             base_currency=account.base_currency,
             nav=account.nav,
-            cash_value=fixed(cash_value, self.money_scale),
-            gross_exposure=fixed(gross_exposure, self.money_scale),
-            net_exposure=fixed(net_exposure, self.money_scale),
-            initial_margin=fixed(initial_margin, self.money_scale),
-            maintenance_margin=fixed(maintenance_margin, self.money_scale),
+            cash_value=self._fixed_for_valuation(cash_value, self.money_scale),
+            gross_exposure=self._fixed_for_valuation(gross_exposure, self.money_scale),
+            net_exposure=self._fixed_for_valuation(net_exposure, self.money_scale),
+            initial_margin=self._fixed_for_valuation(initial_margin, self.money_scale),
+            maintenance_margin=self._fixed_for_valuation(maintenance_margin, self.money_scale),
             positions=tuple(positions),
         )
 
@@ -682,6 +974,7 @@ class ExactAccountLedger:
             raise ValidationError("ledger event time moved backwards")
         prior_mark = self._marks.get(event.instrument_id)
         prior_time = self._event_time
+        transaction_before = len(self._transactions)
         try:
             self._marks[event.instrument_id] = (
                 decimal(event.price),
@@ -690,7 +983,18 @@ class ExactAccountLedger:
             )
             self._mark_fingerprints[event.event_id] = event
             self._event_time = max(self._event_time, event.available_at)
-            return self.snapshot(event.available_at) if create_snapshot else None
+            result = self.snapshot(event.available_at) if create_snapshot else None
+            self._record_dividend_replay_fact(
+                kind="mark",
+                payload=self._mark_replay_payload(
+                    event,
+                    event_id=event.event_id,
+                    price=event.price,
+                ),
+                transaction_count_before=transaction_before,
+                transaction_count_after=len(self._transactions),
+            )
+            return result
         except Exception:
             if prior_mark is None:
                 self._marks.pop(event.instrument_id, None)
@@ -737,12 +1041,24 @@ class ExactAccountLedger:
             raise ValidationError("ledger event time moved backwards")
         prior_mark = self._marks.get(event.instrument_id)
         prior_time = self._event_time
+        transaction_before = len(self._transactions)
         try:
             self._marks[event.instrument_id] = (decimal(price), event.available_at, synthetic_id)
             if not trusted_unique:
                 self._mark_fingerprints[synthetic_id] = event
             self._event_time = max(self._event_time, event.available_at)
-            return self.snapshot(event.available_at) if create_snapshot else None
+            result = self.snapshot(event.available_at) if create_snapshot else None
+            self._record_dividend_replay_fact(
+                kind="mark",
+                payload=self._mark_replay_payload(
+                    event,
+                    event_id=synthetic_id,
+                    price=price,
+                ),
+                transaction_count_before=transaction_before,
+                transaction_count_after=len(self._transactions),
+            )
+            return result
         except Exception:
             if prior_mark is None:
                 self._marks.pop(event.instrument_id, None)
@@ -760,20 +1076,19 @@ class ExactAccountLedger:
             if event_time is not None
             else self._event_time
         )
-        if not any(
+        self._require_valuation_time(at)
+        has_derivative = any(
             quantity and instrument_id in self._derivative_instruments
             for instrument_id, quantity in self._positions.items()
-        ):
-            return False
-        nav = sum(
-            (
-                self._to_base(amount, currency, at)
-                for (account, currency, instrument_id), amount in self._accounts.items()
-                if account == "assets:cash" and instrument_id is None
-            ),
-            Decimal(0),
         )
-        nav += self._dividend_receivable_value(at)
+        if not has_derivative and self.fx_valuation_mode is FxValuationMode.LEGACY:
+            return False
+        nav = self._sum_for_valuation(
+            self._convert_for_valuation(amount, currency, at)
+            for (account, currency, instrument_id), amount in self._accounts.items()
+            if account == "assets:cash" and instrument_id is None
+        )
+        nav = add_decimal_exact(nav, self._dividend_receivable_value(at))
         maintenance_margin = Decimal(0)
         for instrument_id, quantity in self._positions.items():
             spec = self._spec(instrument_id)
@@ -781,25 +1096,40 @@ class ExactAccountLedger:
             mark = self._mark_price(instrument_id, fallback=average)
             multiplier = decimal(spec.contract_multiplier)
             if self._is_derivative(spec):
-                nav += self._to_base(
-                    (mark - average) * quantity * multiplier,
-                    spec.settlement_currency,
-                    at,
+                nav = add_decimal_exact(
+                    nav,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            self._difference_for_valuation(mark, average),
+                            quantity,
+                            multiplier,
+                        ),
+                        spec.settlement_currency,
+                        at,
+                    ),
                 )
-                maintenance_margin += self._to_base(
-                    abs(mark * quantity * multiplier)
-                    * _meta_decimal(spec, "maintenance_margin_rate"),
-                    spec.settlement_currency,
-                    at,
+                maintenance_margin = add_decimal_exact(
+                    maintenance_margin,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            self._product_for_valuation(mark, quantity, multiplier).copy_abs(),
+                            _meta_decimal(spec, "maintenance_margin_rate"),
+                        ),
+                        spec.settlement_currency,
+                        at,
+                    ),
                 )
             else:
-                nav += self._to_base(
-                    mark * quantity * multiplier,
-                    spec.settlement_currency,
-                    at,
+                nav = add_decimal_exact(
+                    nav,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(mark, quantity, multiplier),
+                        spec.settlement_currency,
+                        at,
+                    ),
                 )
-        rounded_nav = fixed(nav, self.money_scale)
-        rounded_maintenance = fixed(maintenance_margin, self.money_scale)
+        rounded_nav = self._fixed_for_valuation(nav, self.money_scale)
+        rounded_maintenance = self._fixed_for_valuation(maintenance_margin, self.money_scale)
         return rounded_maintenance.units > 0 and rounded_nav.units <= rounded_maintenance.units
 
     def apply_corporate_action(self, action, *, at):
@@ -810,11 +1140,21 @@ class ExactAccountLedger:
 
     def apply(self, event: LedgerEvent, *, create_snapshot: bool = True) -> AccountSnapshot | None:
         trading_day = event.event_time.date() if isinstance(event, Fill) else None
-        return self._apply(
+        reference_id = self._event_identity(event)
+        is_new = reference_id not in self._event_fingerprints
+        transaction_before = len(self._transactions)
+        result = self._apply(
             event,
             trading_day=trading_day,
             create_snapshot=create_snapshot,
         )
+        if is_new:
+            self._record_ledger_event_replay_fact(
+                event,
+                trading_day=trading_day,
+                transaction_count_before=transaction_before,
+            )
+        return result
 
     def _apply(
         self,
@@ -1040,11 +1380,22 @@ class ExactAccountLedger:
     ) -> AccountSnapshot | None:
         if not isinstance(trading_day, date) or isinstance(trading_day, datetime):
             raise ValidationError("trading_day must be a date")
-        return self._apply(
+        applied_trading_day = trading_day if isinstance(event, Fill) else None
+        reference_id = self._event_identity(event)
+        is_new = reference_id not in self._event_fingerprints
+        transaction_before = len(self._transactions)
+        result = self._apply(
             event,
-            trading_day=trading_day if isinstance(event, Fill) else None,
+            trading_day=applied_trading_day,
             create_snapshot=create_snapshot,
         )
+        if is_new:
+            self._record_ledger_event_replay_fact(
+                event,
+                trading_day=applied_trading_day,
+                transaction_count_before=transaction_before,
+            )
+        return result
 
     def _apply_replay_event(
         self,
@@ -1059,12 +1410,18 @@ class ExactAccountLedger:
                 raise ValidationError("fill replay application requires a trading_day date")
         elif trading_day is not None:
             raise ValidationError("trading_day is only valid for fill replay application")
+        transaction_before = len(self._transactions)
         self._apply(
             event,
             trading_day=trading_day,
             create_snapshot=False,
             local_rollback=False,
             trusted_unique=True,
+        )
+        self._record_ledger_event_replay_fact(
+            event,
+            trading_day=trading_day,
+            transaction_count_before=transaction_before,
         )
 
     def _validate_event(self, event: LedgerEvent) -> None:
@@ -1140,55 +1497,87 @@ class ExactAccountLedger:
             if event_time is not None
             else self._event_time
         )
+        self._require_valuation_time(at)
         cash: dict[str, FixedPoint] = {}
         for (account, currency, instrument_id), amount in self._accounts.items():
             if account == "assets:cash" and instrument_id is None:
                 cash[currency] = fixed(
-                    decimal(cash.get(currency, FixedPoint(0, self.money_scale))) + amount,
+                    add_decimal_exact(
+                        decimal(cash.get(currency, FixedPoint(0, self.money_scale))),
+                        amount,
+                    ),
                     self.money_scale,
+                    rounding=(
+                        None
+                        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT
+                        else ROUND_HALF_EVEN
+                    ),
                 )
         positions: dict[str, FixedPoint] = {}
         costs: dict[str, FixedPoint] = {}
         realized: dict[str, FixedPoint] = {}
         unrealized: dict[str, FixedPoint] = {}
-        nav = sum(
-            (self._to_base(value, currency, at) for currency, value in cash.items()), Decimal(0)
+        nav = self._sum_for_valuation(
+            self._convert_for_valuation(value, currency, at) for currency, value in cash.items()
         )
-        nav += self._dividend_receivable_value(at)
+        nav = add_decimal_exact(nav, self._dividend_receivable_value(at))
         initial_margin = Decimal(0)
         maintenance_margin = Decimal(0)
         for instrument_id, quantity in sorted(self._positions.items()):
             spec = self._spec(instrument_id)
-            positions[instrument_id] = fixed(quantity, spec.quantity_step.scale)
+            positions[instrument_id] = self._fixed_for_valuation(quantity, spec.quantity_step.scale)
             average = self._average_cost(instrument_id)
-            costs[instrument_id] = fixed(average, spec.price_tick.scale)
+            costs[instrument_id] = self._fixed_for_valuation(average, spec.price_tick.scale)
             realized_value = self._realized(instrument_id)
-            realized[instrument_id] = fixed(
-                self._to_base(realized_value, spec.settlement_currency, at), self.money_scale
+            realized[instrument_id] = self._fixed_for_valuation(
+                self._convert_for_valuation(realized_value, spec.settlement_currency, at),
+                self.money_scale,
             )
             mark = self._mark_price(instrument_id, fallback=average)
             multiplier = decimal(spec.contract_multiplier)
-            pnl = (mark - average) * quantity * multiplier
-            unrealized[instrument_id] = fixed(
-                self._to_base(pnl, spec.settlement_currency, at), self.money_scale
+            pnl = self._product_for_valuation(
+                self._difference_for_valuation(mark, average), quantity, multiplier
+            )
+            unrealized[instrument_id] = self._fixed_for_valuation(
+                self._convert_for_valuation(pnl, spec.settlement_currency, at),
+                self.money_scale,
             )
             if self._is_derivative(spec):
-                nav += self._to_base(pnl, spec.settlement_currency, at)
-                notional = abs(mark * quantity * multiplier)
-                initial_margin += self._to_base(
-                    notional * _meta_decimal(spec, "initial_margin_rate"),
-                    spec.settlement_currency,
-                    at,
+                nav = add_decimal_exact(
+                    nav, self._convert_for_valuation(pnl, spec.settlement_currency, at)
                 )
-                maintenance_margin += self._to_base(
-                    notional * _meta_decimal(spec, "maintenance_margin_rate"),
-                    spec.settlement_currency,
-                    at,
+                notional = self._product_for_valuation(mark, quantity, multiplier).copy_abs()
+                initial_margin = add_decimal_exact(
+                    initial_margin,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            notional, _meta_decimal(spec, "initial_margin_rate")
+                        ),
+                        spec.settlement_currency,
+                        at,
+                    ),
+                )
+                maintenance_margin = add_decimal_exact(
+                    maintenance_margin,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            notional, _meta_decimal(spec, "maintenance_margin_rate")
+                        ),
+                        spec.settlement_currency,
+                        at,
+                    ),
                 )
             else:
-                nav += self._to_base(mark * quantity * multiplier, spec.settlement_currency, at)
-        nav_value = fixed(nav, self.money_scale)
-        maintenance = fixed(maintenance_margin, self.money_scale)
+                nav = add_decimal_exact(
+                    nav,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(mark, quantity, multiplier),
+                        spec.settlement_currency,
+                        at,
+                    ),
+                )
+        nav_value = self._fixed_for_valuation(nav, self.money_scale)
+        maintenance = self._fixed_for_valuation(maintenance_margin, self.money_scale)
         snapshot = AccountSnapshot(
             account_id=self.account_id,
             event_time=at,
@@ -1199,7 +1588,7 @@ class ExactAccountLedger:
             cost_basis=costs,
             realized_pnl=realized,
             unrealized_pnl=unrealized,
-            initial_margin=fixed(initial_margin, self.money_scale),
+            initial_margin=self._fixed_for_valuation(initial_margin, self.money_scale),
             maintenance_margin=maintenance,
             liquidation_required=maintenance.units > 0 and nav_value.units <= maintenance.units,
         )
@@ -1209,21 +1598,33 @@ class ExactAccountLedger:
     def assert_nav_residual(self, snapshot: AccountSnapshot) -> None:
         expected = Decimal(0)
         at = snapshot.event_time
+        self._require_valuation_time(at)
         for currency, balance in snapshot.cash_balances.items():
-            expected += self._to_base(decimal(balance), currency, at)
-        expected += self._dividend_receivable_value(at)
+            expected = add_decimal_exact(
+                expected, self._convert_for_valuation(decimal(balance), currency, at)
+            )
+        expected = add_decimal_exact(expected, self._dividend_receivable_value(at))
         for instrument_id, quantity_fp in snapshot.positions.items():
             spec = self._spec(instrument_id)
             quantity = decimal(quantity_fp)
             mark = self._mark_price(instrument_id, fallback=self._average_cost(instrument_id))
             multiplier = decimal(spec.contract_multiplier)
             if self._is_derivative(spec):
-                component = (mark - self._average_cost(instrument_id)) * quantity * multiplier
+                component = self._product_for_valuation(
+                    self._difference_for_valuation(mark, self._average_cost(instrument_id)),
+                    quantity,
+                    multiplier,
+                )
             else:
-                component = mark * quantity * multiplier
-            expected += self._to_base(component, spec.settlement_currency, at)
-        residual = abs(decimal(snapshot.nav) - expected)
-        tolerance = max(abs(decimal(snapshot.nav)) * Decimal("1e-8"), Decimal("0.01"))
+                component = self._product_for_valuation(mark, quantity, multiplier)
+            expected = add_decimal_exact(
+                expected, self._convert_for_valuation(component, spec.settlement_currency, at)
+            )
+        residual = self._difference_for_valuation(decimal(snapshot.nav), expected).copy_abs()
+        tolerance = max(
+            self._product_for_valuation(decimal(snapshot.nav).copy_abs(), Decimal("1e-8")),
+            Decimal("0.01"),
+        )
         if residual > tolerance:
             raise ValidationError(f"NAV residual {residual} exceeds tolerance {tolerance}")
 
@@ -1942,6 +2343,12 @@ class ExactAccountLedger:
             return Decimal(0)
         spec = self._spec(instrument_id)
         cost = self._position_cost(instrument_id, derivative=self._is_derivative(spec))
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
+            return fraction_decimal_exact(
+                decimal_fraction(cost.copy_abs())
+                / decimal_fraction(quantity.copy_abs())
+                / decimal_fraction(spec.contract_multiplier)
+            )
         return abs(cost) / (abs(quantity) * decimal(spec.contract_multiplier))
 
     def _realized(self, instrument_id: str) -> Decimal:
@@ -1949,7 +2356,11 @@ class ExactAccountLedger:
         credit = self._accounts.get(
             ("income:realized_pnl", spec.settlement_currency, instrument_id), Decimal(0)
         )
-        return -credit
+        return (
+            credit.copy_negate()
+            if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT
+            else -credit
+        )
 
     def _mark_price(self, instrument_id: str, *, fallback: Decimal | None = None) -> Decimal:
         mark = self._marks.get(instrument_id)
@@ -1984,3 +2395,45 @@ class ExactAccountLedger:
                 raise ValidationError("FX snapshot was not available at valuation time")
             rate, available_at = historical
         return value * rate
+
+    def _convert_for_valuation(
+        self,
+        amount: Decimal | FixedPoint,
+        currency: str,
+        at: datetime,
+    ) -> Decimal:
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
+            self._require_valuation_time(at)
+            return convert_dividend_value(self, amount, currency, at)
+        return self._to_base(amount, currency, at)
+
+    def _require_valuation_time(self, at: datetime) -> None:
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT and at < self._event_time:
+            raise ValidationError("HISTORICAL_LEDGER_STATE_UNAVAILABLE")
+
+    def _sum_for_valuation(self, values) -> Decimal:
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
+            return sum_decimal_exact(values)
+        return sum(values, Decimal(0))
+
+    def _product_for_valuation(self, *values: Decimal | FixedPoint | int) -> Decimal:
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
+            return multiply_decimal_exact(*values)
+        result = Decimal(1)
+        for value in values:
+            result *= decimal(value) if isinstance(value, FixedPoint) else value
+        return result
+
+    def _difference_for_valuation(self, left: Decimal, right: Decimal) -> Decimal:
+        if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT:
+            return add_decimal_exact(left, right.copy_negate())
+        return left - right
+
+    def _fixed_for_valuation(self, value: Decimal, scale: int) -> FixedPoint:
+        return fixed(
+            value,
+            scale,
+            rounding=(
+                None if self.fx_valuation_mode is FxValuationMode.EVIDENCED_PIT else ROUND_HALF_EVEN
+            ),
+        )

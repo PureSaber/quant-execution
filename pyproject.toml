@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-execution"
-version = "0.5.1"
+version = "0.6.0"
 description = "Deterministic execution, matching, risk and ledger for PureSaber quant research"
 readme = "README.md"
 license = {text = "MIT"}
@@ -40,6 +40,8 @@ schemas = [
     { id = "puresaber.execution.account-snapshot", version = "1.1.0" },
     { id = "puresaber.execution.run-result", version = "1.1.0" },
     { id = "puresaber.execution.replay-artifact-manifest", version = "1.0.0" },
+    { id = "puresaber.execution.replay-artifact-manifest", version = "1.1.0" },
+    { id = "puresaber.execution.dividend-record", version = "1" },
 ]
 lock-files = ["requirements.lock"]
 

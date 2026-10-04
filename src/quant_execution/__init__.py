@@ -2,8 +2,11 @@
 
 from quant_execution.artifacts import (
     ArrowReplayArtifactSink,
+    DividendReplayResult,
     StoredRunArtifacts,
+    export_dividend_run,
     load_stored_artifacts,
+    replay_dividend_run,
 )
 from quant_execution.broker import DeterministicBroker, remaining_quantity
 from quant_execution.contracts import (
@@ -29,6 +32,21 @@ from quant_execution.contracts import (
     Settlement,
     Side,
     TimeInForce,
+)
+from quant_execution.dividends import (
+    DIVIDEND_RECORD_SCHEMA_ID,
+    DividendEntitlementBasis,
+    DividendExecutionMode,
+    DividendExecutionPhase,
+    DividendExecutionRecord,
+    DividendExecutionRequest,
+    DividendExposureItem,
+    DividendExposureSnapshot,
+    DividendLifecycleState,
+    DividendValuationRecord,
+    EntitlementEvidenceVerifier,
+    FxValuationMode,
+    PitFxObservationRecord,
 )
 from quant_execution.engine import (
     DeterministicRunEngine,
@@ -77,11 +95,12 @@ from quant_execution.schemas import (
 )
 from quant_execution.state_machine import ALLOWED_TRANSITIONS, transition_order
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 __all__ = [
     "ACCOUNT_SNAPSHOT_SCHEMA_ID",
     "ALLOWED_TRANSITIONS",
+    "DIVIDEND_RECORD_SCHEMA_ID",
     "FEE_SCHEMA_ID",
     "FILL_SCHEMA_ID",
     "FUNDING_SCHEMA_ID",
@@ -102,11 +121,23 @@ __all__ = [
     "CryptoSpotRule",
     "DeterministicBroker",
     "DeterministicRunEngine",
+    "DividendEntitlementBasis",
+    "DividendExecutionMode",
+    "DividendExecutionPhase",
+    "DividendExecutionRecord",
+    "DividendExecutionRequest",
+    "DividendExposureItem",
+    "DividendExposureSnapshot",
+    "DividendLifecycleState",
+    "DividendReplayResult",
+    "DividendValuationRecord",
+    "EntitlementEvidenceVerifier",
     "ExactAccountLedger",
     "Fee",
     "Fill",
     "Funding",
     "FuturesRule",
+    "FxValuationMode",
     "L2MatchingModel",
     "LedgerEvent",
     "LedgerEventType",
@@ -120,6 +151,7 @@ __all__ = [
     "OrderIntent",
     "OrderStatus",
     "OrderType",
+    "PitFxObservationRecord",
     "PortfolioRiskPolicy",
     "PortfolioRiskSnapshot",
     "PositionRiskSnapshot",
@@ -140,10 +172,12 @@ __all__ = [
     "TimeInForce",
     "TradeBBOModel",
     "execution_payload",
+    "export_dividend_run",
     "get_arrow_schema",
     "get_json_schema",
     "load_stored_artifacts",
     "remaining_quantity",
+    "replay_dividend_run",
     "resolve_a_share_replay_status",
     "transition_order",
     "validate_arrow_table",
