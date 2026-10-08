@@ -31,7 +31,7 @@ from quant_data_kit import (
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.financial import DividendLifecycle, PitFxRate
 
-from quant_execution._json import fixed_token, string_token, utc_token
+from quant_execution._json import fixed_token, parse_utc_timestamp, string_token, utc_token
 from quant_execution.contracts import (
     Fee,
     Fill,
@@ -768,15 +768,7 @@ def _time_payload(value: datetime) -> str:
 
 
 def _time_from_payload(value: object, field: str) -> datetime:
-    if not isinstance(value, str):
-        raise ValidationError(f"{field} must be an ISO-8601 timestamp")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValidationError(f"{field} must be an ISO-8601 timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValidationError(f"{field} must be timezone-aware")
-    return parsed
+    return parse_utc_timestamp(value, field=field)
 
 
 def _spec_payload(spec: InstrumentSpec) -> dict[str, object]:
