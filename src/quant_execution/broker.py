@@ -10,7 +10,12 @@ from datetime import date, datetime
 from quant_data_kit import FixedPoint
 from quant_data_kit.exceptions import ValidationError
 
-from quant_execution._json import fixed_token, flat_sequence_bytes, string_token
+from quant_execution._json import (
+    fixed_token,
+    flat_sequence_bytes,
+    parse_utc_timestamp,
+    string_token,
+)
 from quant_execution.artifacts import fill_bytes, order_bytes, order_event_bytes
 from quant_execution.contracts import (
     Fill,
@@ -56,7 +61,7 @@ def _fixed_from_payload(payload: dict[str, int] | None) -> FixedPoint | None:
 
 
 def _time_from_payload(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parse_utc_timestamp(value, field="event_time")
 
 
 def _order_from_bytes(payload: bytes) -> Order:

@@ -36,7 +36,7 @@ def fp(value, scale: int = 8) -> FixedPoint:
 
 
 def settled_cash(ledger: ExactAccountLedger, at: datetime) -> Decimal:
-    if utc(at).to_pydatetime() < ledger.snapshot().event_time:
+    if utc(at) < ledger.snapshot().event_time:
         raise ValueError("cash query cannot precede current account state")
     day = str(utc(at).tz_convert("America/New_York").date())
     pending = Decimal(0)
@@ -119,7 +119,7 @@ class USCashAccount:
         return Decimal(0) if value is None else money(value.to_decimal())
 
     def buying_power(self, at) -> Decimal:
-        return max(Decimal(0), settled_cash(self.ledger, utc(at).to_pydatetime()))
+        return max(Decimal(0), settled_cash(self.ledger, utc(at)))
 
     @staticmethod
     def _fields(event_id, instrument_id, at):
@@ -128,9 +128,9 @@ class USCashAccount:
         return {
             "event_id": event_id,
             "instrument_id": instrument_id,
-            "event_time": stamp.to_pydatetime(),
-            "received_at": stamp.to_pydatetime(),
-            "available_at": stamp.to_pydatetime(),
+            "event_time": stamp,
+            "received_at": stamp,
+            "available_at": stamp,
             "source": "us-research-model",
             "trading_day": day,
             "session_id": f"XNYS:{day}",
@@ -163,12 +163,12 @@ class USCashAccount:
         )
 
     def _check_time(self, at):
-        if utc(at).to_pydatetime() < self.ledger.snapshot().event_time:
+        if utc(at) < self.ledger.snapshot().event_time:
             raise ValueError("account event cannot precede current account state")
 
     def trade(self, instrument_id, quantity, reference_price, at, trade_id) -> dict:
         quantity, price = money(quantity), money(reference_price)
-        stamp = utc(at).to_pydatetime()
+        stamp = utc(at)
         fingerprint = (instrument_id, quantity, price, stamp)
         if trade_id in self._trades:
             if self._trades[trade_id] != fingerprint:

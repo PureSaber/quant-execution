@@ -6,7 +6,21 @@ import json
 from collections.abc import Sequence
 from datetime import datetime
 
-from quant_data_kit import FixedPoint
+from quant_data_kit import FixedPoint, ensure_utc_datetime
+from quant_data_kit.exceptions import ValidationError
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
+
+
+def parse_utc_timestamp(value: object, *, field: str) -> datetime:
+    """Read an exact UTC JSON time while preserving historical microsecond types."""
+    if not isinstance(value, str):
+        raise ValidationError(f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = parse_timestamp_exact(value, field=field)
+    except ValueError as exc:
+        raise ValidationError(f"{field} must be an ISO-8601 timestamp: {exc}") from exc
+    result = ensure_utc_datetime(parsed, field=field)
+    return result if result.nanosecond else result.to_pydatetime()
 
 
 def flat_sequence_bytes(values: Sequence[object]) -> bytes:

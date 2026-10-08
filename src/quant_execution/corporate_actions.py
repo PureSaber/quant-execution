@@ -19,7 +19,7 @@ from .contracts import LedgerEventType, LedgerTransaction
 
 def apply_action(ledger, action: ActionTerms, *, at):
     ledger._require_mutable()
-    stamp = utc(at).to_pydatetime()
+    stamp = utc(at)
     if stamp < utc(action.effective_at) or stamp < utc(action.available_at):
         raise ValidationError("corporate action is not effective and known yet")
     fingerprint = action.fingerprint()

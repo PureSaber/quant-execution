@@ -29,6 +29,7 @@ from quant_execution._fixed import (
     fraction_decimal_exact,
     sum_decimal_exact,
 )
+from quant_execution._json import parse_utc_timestamp
 from quant_execution.contracts import LedgerEventType, LedgerTransaction, Posting
 
 DIVIDEND_RECORD_SCHEMA_ID = "puresaber.execution.dividend-record/1"
@@ -138,11 +139,7 @@ def _timestamp(value: datetime) -> str:
 
 
 def _parse_timestamp(value: str, field: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (AttributeError, ValueError) as exc:
-        raise ValidationError(f"{field} must be an ISO-8601 timestamp") from exc
-    return _utc(parsed, field)
+    return parse_utc_timestamp(value, field=field)
 
 
 def canonical_bytes(value: object) -> bytes:
