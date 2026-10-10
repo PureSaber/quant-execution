@@ -1067,6 +1067,8 @@ class ExactAccountLedger:
 
     def liquidation_required(self, event_time: datetime | None = None) -> bool:
         """Evaluate the maintenance boundary without materializing reporting maps."""
+        if any("initial_margin_per_contract" in self._spec(i).metadata for i in self._positions):
+            return self.snapshot(event_time).liquidation_required
         at = (
             ensure_utc_datetime(event_time, field="event_time")
             if event_time is not None
@@ -1558,6 +1560,32 @@ class ExactAccountLedger:
                         at,
                     ),
                 )
+            # Declared research margin has no portfolio offsets or SPAN claim.
+            if "initial_margin_per_contract" in spec.metadata and (
+                self._is_derivative(spec)
+                or (spec.asset_class is AssetClass.OPTION and quantity < 0)
+            ):
+                initial_margin = add_decimal_exact(
+                    initial_margin,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            quantity.copy_abs(), _meta_decimal(spec, "initial_margin_per_contract")
+                        ),
+                        spec.settlement_currency,
+                        at,
+                    ),
+                )
+                maintenance_margin = add_decimal_exact(
+                    maintenance_margin,
+                    self._convert_for_valuation(
+                        self._product_for_valuation(
+                            quantity.copy_abs(),
+                            _meta_decimal(spec, "maintenance_margin_per_contract"),
+                        ),
+                        spec.settlement_currency,
+                        at,
+                    ),
+                )
         nav_value = self._fixed_for_valuation(nav, self.money_scale)
         maintenance = self._fixed_for_valuation(maintenance_margin, self.money_scale)
         snapshot = AccountSnapshot(
@@ -1699,7 +1727,7 @@ class ExactAccountLedger:
         spec = self._spec(event.instrument_id)
         if event.action_type == "terminal_cash":
             if (
-                spec.asset_class not in {AssetClass.EQUITY, AssetClass.ETF}
+                spec.asset_class not in {AssetClass.EQUITY, AssetClass.ETF, AssetClass.OPTION}
                 or event.ratio is None
                 or event.ratio.units != 0
                 or event.cash_amount is None
@@ -1872,6 +1900,53 @@ class ExactAccountLedger:
                         "memo:position_cost_counter",
                         spec.settlement_currency,
                         cost_delta.copy_negate(),
+                        instrument_id=fill_event.instrument_id,
+                    ),
+                ]
+            )
+        elif (
+            spec.asset_class is AssetClass.OPTION
+            or spec.metadata.get("research_delivery") == "true"
+        ):
+            # Premium-funded signed positions. Closing consumes signed book cost;
+            # reversals open the residual at the new price. All postings are exact
+            # residuals of the quantized cash and book-cost amounts.
+            old_cost = self._position_cost(fill_event.instrument_id, derivative=False)
+            closed_cost = (
+                self._allocated_position_cost(fill_event.instrument_id, close_quantity)
+                if close_quantity
+                else Decimal(0)
+            )
+            opening = quantity - close_quantity
+            open_cost = decimal(
+                fixed(
+                    self._product_for_valuation(
+                        opening if signed_quantity > 0 else -opening, price, multiplier
+                    ),
+                    self.money_scale,
+                )
+            )
+            cost_delta = add_decimal_exact(open_cost, -closed_cost)
+            cash_delta = decimal(
+                fixed(
+                    self._product_for_valuation(-signed_quantity, price, multiplier),
+                    self.money_scale,
+                )
+            )
+            pnl_posting = -add_decimal_exact(cash_delta, cost_delta)
+            postings.extend(
+                [
+                    self._posting("assets:cash", spec.settlement_currency, cash_delta),
+                    self._posting(
+                        "assets:position_cost",
+                        spec.settlement_currency,
+                        cost_delta,
+                        instrument_id=fill_event.instrument_id,
+                    ),
+                    self._posting(
+                        "income:realized_pnl",
+                        spec.settlement_currency,
+                        pnl_posting,
                         instrument_id=fill_event.instrument_id,
                     ),
                 ]
