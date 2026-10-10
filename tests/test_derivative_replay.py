@@ -9,6 +9,22 @@ from quant_execution.derivative_replay import replay, verify_artifacts, write_ar
 from quant_execution.derivatives import DerivativeAccount
 
 
+def test_analysis_only_bundle_cannot_enter_account_replay(tmp_path):
+    demo = write_demo(tmp_path / "demo", "future")
+    bundle = write_bundle(
+        tmp_path / "limited",
+        demo.contracts,
+        demo.quotes,
+        provider="test",
+        evidence_kind="synthetic",
+        rights_note="test",
+        limits="analysis only",
+        source={"allowed_modes": ["analysis"]},
+    )
+    with pytest.raises(ValueError, match="permits"):
+        replay(bundle, {"initial_cash": 10000}, lambda quotes, at: {})
+
+
 def test_next_bar_fills_artifact_balance_and_tamper_rejection(tmp_path):
     bundle = write_demo(tmp_path / "bundle", "future")
     config = {
