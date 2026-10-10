@@ -6,6 +6,7 @@ import csv
 import hashlib
 import html
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 
@@ -194,6 +195,51 @@ def write_csv(path, rows, columns=None):
         writer.writerows(rows)
 
 
+def line_chart(title, series, x_label, y_label):
+    """Labeled SVG slices, with no implied surface fitting or external assets."""
+    points = [point for values in series.values() for point in values]
+    if not points:
+        return ""
+    if any(not math.isfinite(v) for point in points for v in point):
+        raise ValueError("chart coordinates must be finite")
+    xs, ys = zip(*points)
+    xmin, xmax, ymin, ymax = min(xs), max(xs), min(ys), max(ys)
+    xspan, yspan = max(xmax - xmin, 1e-9), max(ymax - ymin, 1e-9)
+    parts, legend = [], []
+    colors = ("#55d9ad", "#73b7ff", "#f1b95a", "#e995df", "#9bdd71", "#ef9191")
+    for index, (name, values) in enumerate(series.items()):
+        color = colors[index % len(colors)]
+        coordinates = [
+            (70 + 650 * (x - xmin) / xspan, 210 - 170 * (y - ymin) / yspan)
+            for x, y in sorted(values)
+        ]
+        polyline = " ".join(f"{x:.2f},{y:.2f}" for x, y in coordinates)
+        parts.append(
+            f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{polyline}"/>'
+        )
+        parts.extend(
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3" fill="{color}"/>' for x, y in coordinates
+        )
+        legend.append(f'<span style="color:{color}">{html.escape(str(name))}</span>')
+    for i in range(5):
+        fraction = i / 4
+        x, y = 70 + 650 * fraction, 210 - 170 * fraction
+        parts.append(
+            f'<text x="{x:.1f}" y="230" fill="#bcd1de" text-anchor="middle" font-size="12">{xmin + xspan * fraction:.4g}</text>'
+        )
+        parts.append(
+            f'<text x="60" y="{y:.1f}" fill="#bcd1de" text-anchor="end" font-size="12">{ymin + yspan * fraction:.4g}</text>'
+        )
+    return (
+        f"<h2>{html.escape(title)}</h2><p>{html.escape(x_label)} / {html.escape(y_label)}</p>"
+        f'<svg role="img" aria-label="{html.escape(title, quote=True)}" viewBox="0 0 800 255">'
+        + "".join(parts)
+        + "</svg><p>"
+        + " · ".join(legend)
+        + "</p>"
+    )
+
+
 def write_artifacts(output, study, tables):
     """Small responsive report; no scripts, no external requests or raw HTML inputs."""
     output = Path(output)
@@ -220,6 +266,31 @@ def write_artifacts(output, study, tables):
             for i, v in enumerate(values)
         )
         chart = f'<h2>账户净值</h2><p>{esc(nav[0]["date"])} → {esc(nav[-1]["date"])} · {esc(values[-1])} {esc(study.get("currency", ""))}</p><svg role="img" aria-label="账户净值曲线" viewBox="0 0 800 210"><polyline fill="none" stroke="#55d9ad" stroke-width="3" points="{points}"/></svg>'
+    if tables.get("surface.csv"):
+        slices = defaultdict(list)
+        for row in tables["surface.csv"]:
+            if row["iv"] is not None:
+                slices[f"{row['expiry'][:10]} {row['right']}"].append(
+                    (float(row["strike"]), float(row["iv"]) * 100)
+                )
+        chart += line_chart("隐含波动率切片（观察点；未拟合曲面）", slices, "执行价", "IV %")
+    if tables.get("scenarios.csv"):
+        slices = defaultdict(list)
+        for row in tables["scenarios.csv"]:
+            slices[f"波动率变化 {float(row['volatility_shock']) * 100:+.0f} 个百分点"].append(
+                (float(row["underlying_shock"]) * 100, float(row["model_pnl_vs_current"]))
+            )
+        chart += line_chart(
+            "组合情景损益", slices, "标的价格变化 %", study.get("currency", "计价币种")
+        )
+    if tables.get("curve.csv"):
+        latest = max(row["session"] for row in tables["curve.csv"])
+        values = [
+            (float(row["days_to_expiry"]), float(row["close"]))
+            for row in tables["curve.csv"]
+            if row["session"] == latest
+        ]
+        chart += line_chart("最新期限结构", {latest: values}, "距到期日历天数", "原始合约价格")
     sections = []
     for name, rows in tables.items():
         if not rows:
