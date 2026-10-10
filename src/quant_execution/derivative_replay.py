@@ -22,6 +22,7 @@ def replay(bundle, config, decide):
     Fees and adverse tick slippage apply to every fill. Daily-bar fills are a
     declared research assumption, not bid/ask or actual execution evidence.
     """
+    bundle.require_mode("replay")
     groups = defaultdict(dict)
     for q in bundle.quotes:
         groups[q.session][q.instrument_id] = q
