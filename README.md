@@ -232,3 +232,9 @@ the earlier materialized-path profile remain disclosed separately in
 The artifact-retention contract, differential matrix, benchmark definition and current gate evidence
 are documented in
 [`docs/performance-m7-streaming.md`](docs/performance-m7-streaming.md).
+
+## 机构研究扩展（2026-10-11）
+
+新增库存报价策略与命令行，复用 L2/BBO、费用、风控和精确账本。现金账户库存保持非负。
+
+统一入口与合成输入用法见相邻仓库 [quant-workspace/profiles/institutional-research](../quant-workspace/profiles/institutional-research/README.md)。此增量提供离线合成验收、账户回放和独立 Studio 入口；真实市场数据与权限仍须明确提供。验收命令及边界见上述入口。

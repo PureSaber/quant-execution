@@ -913,7 +913,10 @@ class RuleBookRiskGate:
                 if reserved_instrument == instrument_id and key != intent.idempotency_key
             )
             available_position = abs(_value(snapshot.positions.get(instrument_id)))
-            if spec.asset_class in {AssetClass.EQUITY, AssetClass.ETF}:
+            if spec.asset_class in {
+                AssetClass.EQUITY,
+                AssetClass.ETF,
+            } and spec.product_type.lower() not in {"us_equity", "us_etf"}:
                 available_position -= self.ledger.acquired_today(
                     instrument_id, state.event.trading_day
                 )
