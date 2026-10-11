@@ -78,6 +78,15 @@ def digest(value):
 class _CashLedger(ExactAccountLedger):
     """Closed research cash journal; no changes to existing public ledger methods."""
 
+    def native_future_pnl(self, instrument, mark):
+        # Collateral is reserved in its native currency. Never divide a rounded
+        # base-currency reporting PnL by FX: that can erase a small native loss.
+        quantity = self._positions.get(instrument, ZERO)
+        spec = self.instruments[instrument]
+        return quantity * mark * spec.contract_multiplier.to_decimal() - self._position_cost(
+            instrument, derivative=True
+        )
+
     def cash_journal(self, identity, changes, at, category):
         changes = {currency: fp(amount).to_decimal() for currency, amount in changes.items()}
         counterpart = {
@@ -233,10 +242,7 @@ class SharedCapitalAccount:
                         "maintenance_margin_rate" if maintenance else "initial_margin_rate"
                     ]
                 )
-                pnl = (
-                    snap.unrealized_pnl[instrument].to_decimal()
-                    / self.rates[spec.settlement_currency]
-                )
+                pnl = book.native_future_pnl(instrument, price)
                 free[spec.settlement_currency] += min(ZERO, pnl)
         return free
 

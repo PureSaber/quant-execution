@@ -204,6 +204,31 @@ def test_closed_events_exact_cash_precision_and_atomic_restore():
     assert a.report() == original
 
 
+def test_native_futures_loss_is_reserved_before_fx_reporting_rounding():
+    instrument = spec(
+        "F",
+        asset_class=AssetClass.FUTURE,
+        product_type="linear_future",
+        settlement_currency="EUR",
+        price_tick="0.00000001",
+        margin_mode=MarginMode.CROSS,
+        metadata={"initial_margin_rate": "0.2", "maintenance_margin_rate": "0.1"},
+    )
+    a = SharedCapitalAccount(
+        specs=[instrument],
+        owners={"F": "beta"},
+        allocations={"beta": {"EUR": "100"}},
+        base_currency="USD",
+        opened_at=T0.isoformat(),
+        fx_rates={"EUR": "0.1"},
+    )
+    a.apply(fill(1, "beta", "F", quantity="1", price="100", fee="0"))
+    a.apply(event(2, "mark", instrument_id="F", price="99.99999999"))
+    # Native loss is 1e-8 EUR, even though its 1e-9 USD report rounds to zero.
+    expected = Decimal(100) - Decimal("99.99999999") * Decimal("0.2") - Decimal("0.00000001")
+    assert a.liquidity("beta")["EUR"] == expected == Decimal("79.999999992")
+
+
 @pytest.mark.parametrize(
     "changes",
     [
