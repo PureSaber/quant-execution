@@ -1727,7 +1727,8 @@ class ExactAccountLedger:
         spec = self._spec(event.instrument_id)
         if event.action_type == "terminal_cash":
             if (
-                spec.asset_class not in {AssetClass.EQUITY, AssetClass.ETF, AssetClass.OPTION}
+                spec.asset_class
+                not in {AssetClass.EQUITY, AssetClass.ETF, AssetClass.OPTION, AssetClass.BOND}
                 or event.ratio is None
                 or event.ratio.units != 0
                 or event.cash_amount is None
