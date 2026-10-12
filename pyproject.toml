@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pyarrow>=14.0",
     "jsonschema>=4.20",
-    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@f49f1cc306a4a27a2734e21c89ec5b68f7d7384d",
+    "quant-data-kit @ git+https://github.com/PureSaber/quant-data-kit.git@f85128307dd0e3407d24350282fe7b679b591309",
 ]
 
 [project.optional-dependencies]

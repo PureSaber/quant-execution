@@ -1,5 +1,8 @@
 # quant-execution
 
+The additive [shared-capital research account](docs/SHARED_CAPITAL.md) supports
+continuous sleeve allocation, explicit settlement/FX, margin states and checkpoints.
+
 研究可信度升级：接口、使用示例、验收及限制见 [11–20 使用说明](docs/CONTINUOUS_REPLAY.md)。
 
 Hong Kong daily cash-equity research is available through
