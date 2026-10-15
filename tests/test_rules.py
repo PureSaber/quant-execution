@@ -12,7 +12,9 @@ from quant_data_kit.exceptions import ValidationError
 from quant_execution import (
     Fill,
     LiquidityRole,
+    Order,
     OrderIntent,
+    OrderStatus,
     OrderType,
     Side,
     TimeInForce,
@@ -211,6 +213,98 @@ def test_a_share_lot_t1_limit_status_and_stamp_duty() -> None:
     assert (
         gate.check(intent(STOCK, Side.BUY, "100", key="halted"), ledger.snapshot()).code
         == "MARKET_NOT_TRADABLE"
+    )
+
+
+def test_a_share_odd_remainder_sale_preserves_t1_and_reservations():
+    registry = specs()
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments=registry,
+        initial_cash={"CNY": fp("100000")},
+    )
+    gate = RuleBookRiskGate(instruments=registry, ledger=ledger)
+    market = state_event(STOCK, "10")
+    gate.observe(market)
+    ledger.observe_market(market)
+    # Partial fills or a distribution can leave an integer odd balance.
+    fill = Fill(
+        fill_id="odd-fill",
+        order_id="old",
+        account_id="account",
+        strategy_id="strategy",
+        instrument_id=STOCK,
+        side=Side.BUY,
+        quantity=fp("255"),
+        price=fp("10"),
+        event_time=T0,
+        liquidity_role=LiquidityRole.TAKER,
+    )
+    ledger.apply_with_trading_day(fill, trading_day=market.trading_day)
+    odd = intent(STOCK, Side.SELL, "55", key="odd-sell")
+    assert gate.check(odd, ledger.snapshot()).code == "A_SHARE_T_PLUS_ONE"
+    gate.observe(state_event(STOCK, "10", trading_day=date(2026, 1, 3)))
+    for quantity in ("55", "155", "255", "100", "200"):
+        assert gate.check(
+            intent(STOCK, Side.SELL, quantity, key="s" + quantity), ledger.snapshot()
+        ).accepted
+    for quantity in ("5", "50", "150"):
+        assert (
+            gate.check(
+                intent(STOCK, Side.SELL, quantity, key="bad" + quantity), ledger.snapshot()
+            ).code
+            == "A_SHARE_LOT"
+        )
+    assert (
+        gate.check(intent(STOCK, Side.SELL, "355", key="oversell"), ledger.snapshot()).code
+        == "A_SHARE_T_PLUS_ONE"
+    )
+    # A partially filled original sell remains valid. A retry uses the entire
+    # new remainder, not the original odd quantity after it has been consumed.
+    sold = replace(
+        fill,
+        fill_id="sell-part",
+        order_id="sell",
+        side=Side.SELL,
+        quantity=fp("125"),
+        event_time=T0 + timedelta(days=1),
+    )
+    ledger.apply_with_trading_day(sold, trading_day=date(2026, 1, 3))
+    assert gate.check(intent(STOCK, Side.SELL, "130", key="remaining"), ledger.snapshot()).accepted
+    assert gate.check(odd, ledger.snapshot()).code == "A_SHARE_LOT"
+    assert (
+        gate.check(intent(STOCK, Side.BUY, "30", key="bad-buy"), ledger.snapshot()).code
+        == "A_SHARE_LOT"
+    )
+
+
+def test_live_partial_order_keeps_its_original_lot_admission_but_new_retry_does_not():
+    registry = specs()
+    ledger = ExactAccountLedger(
+        account_id="account",
+        base_currency="CNY",
+        instruments=registry,
+        initial_cash={"CNY": fp("100000")},
+    )
+    gate = RuleBookRiskGate(instruments=registry, ledger=ledger)
+    gate.observe(state_event(STOCK, "10"))
+    original = intent(STOCK, Side.BUY, "100", key="accepted-board-lot")
+    assert gate.check(original, ledger.snapshot()).accepted
+    order = Order(
+        order_id="partial",
+        intent=original,
+        status=OrderStatus.PARTIALLY_FILLED,
+        filled_quantity=fp("30", 0),
+        version=2,
+    )
+    assert gate.check_open_order(order, ledger.snapshot(), event_time=T0).accepted
+    assert gate.check_open_order_current(order, event_time=T0).accepted
+    assert (
+        gate.check(
+            replace(original, idempotency_key="new-retry", quantity=fp("70", 0)), ledger.snapshot()
+        ).code
+        == "A_SHARE_LOT"
     )
 
 

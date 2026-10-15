@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
 from functools import lru_cache
 from types import MappingProxyType
@@ -1220,7 +1220,21 @@ class ExactAccountLedger:
                 )
             elif isinstance(event, CorporateActionEvent):
                 self._apply_dividend_state(event)
-                if event.ratio is not None:
+                if event.share_entitlement is not None:
+                    terms = event.share_entitlement
+                    # The lot becomes sellable on the declared date. An ordinary
+                    # buy still has today's lot date and remains T+1 restricted.
+                    self._position_lots[event.instrument_id] = [
+                        *self._position_lots.get(event.instrument_id, ()),
+                        (terms.sellable_date - timedelta(days=1), terms.resolved_quantity()),
+                    ]
+                    if terms.reference_price is not None:
+                        self._marks[event.instrument_id] = (
+                            decimal(terms.reference_price),
+                            event.available_at,
+                            event.event_id,
+                        )
+                elif event.ratio is not None:
                     self._apply_split_state(event)
             if not trusted_unique:
                 self._event_fingerprints[reference_id] = (
@@ -1635,7 +1649,7 @@ class ExactAccountLedger:
             (
                 abs(quantity)
                 for day, quantity in self._position_lots.get(instrument_id, ())
-                if day == trading_day
+                if day >= trading_day
             ),
             Decimal(0),
         )
@@ -1725,6 +1739,14 @@ class ExactAccountLedger:
 
     def _validate_corporate_action(self, event: CorporateActionEvent) -> None:
         spec = self._spec(event.instrument_id)
+        if event.share_entitlement is not None:
+            terms = event.share_entitlement
+            if terms.account_id != self.account_id:
+                raise ValidationError("share entitlement belongs to a different account")
+            if spec.asset_class not in {AssetClass.EQUITY, AssetClass.ETF}:
+                raise ValidationError("share entitlement requires a cash equity instrument")
+            if terms.resolved_quantity() % decimal(spec.quantity_step):
+                raise ValidationError("credited entitlement violates the instrument quantity step")
         if event.action_type == "terminal_cash":
             if (
                 spec.asset_class
@@ -2174,8 +2196,15 @@ class ExactAccountLedger:
                     ]
                 )
             else:
+                entitled_quantity = (
+                    decimal(event.share_entitlement.eligible_quantity)
+                    if event.share_entitlement is not None
+                    else quantity
+                )
                 cash_delta = (
-                    quantity * decimal(event.cash_amount) * decimal(spec.contract_multiplier)
+                    entitled_quantity
+                    * decimal(event.cash_amount)
+                    * decimal(spec.contract_multiplier)
                 )
                 asset_account = (
                     "assets:dividend_receivable"
@@ -2202,8 +2231,12 @@ class ExactAccountLedger:
                         ),
                     ]
                 )
-        if event.ratio is not None:
-            quantity_delta = quantity * (decimal(event.ratio) - Decimal(1))
+        if event.ratio is not None or event.share_entitlement is not None:
+            quantity_delta = (
+                event.share_entitlement.resolved_quantity()
+                if event.share_entitlement is not None
+                else quantity * (decimal(event.ratio) - Decimal(1))
+            )
             postings.extend(
                 [
                     self._posting(

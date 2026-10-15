@@ -30,6 +30,7 @@ from quant_data_kit import (
 )
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.financial import DividendLifecycle, PitFxRate
+from quant_data_kit.share_entitlements import ShareEntitlement
 
 from quant_execution._json import fixed_token, parse_utc_timestamp, string_token, utc_token
 from quant_execution.contracts import (
@@ -946,6 +947,11 @@ def _ledger_event_from_business_fact(value: object):
                 else None
             ),
             currency=payload["currency"],
+            share_entitlement=(
+                ShareEntitlement.from_payload(payload["share_entitlement"])
+                if payload.get("share_entitlement") is not None
+                else None
+            ),
         )
     raise ValidationError("unsupported ledger event business fact")
 
