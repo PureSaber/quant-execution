@@ -209,15 +209,23 @@ class AShareRule(_AssetRule):
         state: MarketState,
         spec: InstrumentSpec,
         ledger: ExactAccountLedger,
+        *,
+        accepted_partial_order: bool = False,
     ) -> RiskDecision:
         base = super().check(intent, snapshot, state, spec, ledger)
         if not base.accepted:
             return base
         lot_size = _metadata_decimal(spec, "lot_size", required=True)
-        if decimal(intent.quantity) % lot_size:
-            return RiskDecision(False, "A_SHARE_LOT", "quantity is not an A-share board lot")
         quantity = decimal(intent.quantity)
         position = _value(snapshot.positions.get(intent.instrument_id))
+        if (
+            not accepted_partial_order
+            and quantity % lot_size
+            and not (intent.side is Side.SELL and quantity % lot_size == position % lot_size)
+        ):
+            return RiskDecision(
+                False, "A_SHARE_LOT", "buy requires board lots; sell must clear the odd remainder"
+            )
         if intent.side is Side.SELL:
             acquired = ledger.acquired_today(intent.instrument_id, state.event.trading_day)
             if quantity > position - acquired:
@@ -491,7 +499,12 @@ class RuleBookRiskGate:
                 created_at=event_time,
             )
         )
-        return self._check(remaining_intent, account_snapshot, as_of=event_time)
+        return self._check(
+            remaining_intent,
+            account_snapshot,
+            as_of=event_time,
+            accepted_partial_order=order.filled_quantity.units > 0,
+        )
 
     def check_open_order_current(
         self,
@@ -518,6 +531,7 @@ class RuleBookRiskGate:
             remaining_intent,
             self._current_view(event_time, order.intent.instrument_id),
             as_of=event_time,
+            accepted_partial_order=order.filled_quantity.units > 0,
         )
 
     def _check(
@@ -526,6 +540,7 @@ class RuleBookRiskGate:
         account_snapshot: AccountSnapshot | _RiskAccountView,
         *,
         as_of: datetime,
+        accepted_partial_order: bool = False,
         prepared_reservation: list[
             tuple[tuple[str, Decimal] | None, Decimal, tuple[str, Decimal] | None]
         ]
@@ -560,9 +575,13 @@ class RuleBookRiskGate:
             if value is not None and not aligned(value, spec.price_tick):
                 return RiskDecision(False, "PRICE_TICK", f"{field_name} violates price tick")
         try:
-            decision = self._rule_for(spec).check(
-                order_intent, account_snapshot, state, spec, self.ledger
+            rule = self._rule_for(spec)
+            extra = (
+                {"accepted_partial_order": accepted_partial_order}
+                if isinstance(rule, AShareRule)
+                else {}
             )
+            decision = rule.check(order_intent, account_snapshot, state, spec, self.ledger, **extra)
             if not decision.accepted:
                 return decision
             reservation = self._reservation_requirement(order_intent, state, spec)
