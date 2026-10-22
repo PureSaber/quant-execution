@@ -80,7 +80,7 @@ rpds-py==0.30.0
     #   -c requirements-constraints.txt
     #   jsonschema
     #   referencing
-ruff==0.16.10
+ruff==0.17.1
     # via quant-execution (pyproject.toml)
 six==1.17.0
     # via python-dateutil
